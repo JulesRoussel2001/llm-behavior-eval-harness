@@ -8,17 +8,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from claude_behavior_eval.main import ACTOR_SYSTEM_PROMPT, run_evaluation
-from claude_behavior_eval.schemas import EvaluationResult, MRBenchEvaluation
+from claude_behavior_eval.schemas import DimensionJudgment, EvaluationResult, MRBenchEvaluation
+
+_R = "Dummy reason."
+
+
+def _dim(passed: bool) -> DimensionJudgment:
+    return DimensionJudgment(reason=_R, passed=passed)
+
 
 DUMMY_SCORES = MRBenchEvaluation(
-    mistake_identification=True,
-    mistake_location=False,
-    answer_revealing_appropriate=True,
-    providing_guidance=True,
-    actionability=False,
-    coherence=True,
-    tutor_tone=True,
-    human_likeness=False,
+    mistake_identification=_dim(True),
+    mistake_location=_dim(False),
+    answer_revealing_appropriate=_dim(True),
+    providing_guidance=_dim(True),
+    actionability=_dim(False),
+    coherence=_dim(True),
+    tutor_tone=_dim(True),
+    human_likeness=_dim(False),
 )
 
 DUMMY_RESULT_1 = EvaluationResult(

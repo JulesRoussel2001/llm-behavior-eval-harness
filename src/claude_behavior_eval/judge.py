@@ -11,8 +11,12 @@ _SYSTEM_PROMPT = (
     "You are a validated proxy evaluator, not an objective ground truth: your scores "
     "approximate expert human judgment and should be interpreted accordingly. "
     "Evaluate the generated tutor response by calling the mrbench_evaluation tool. "
-    "Score each dimension as true (pass) or false (fail) based strictly on the "
-    "provided rubric criteria."
+    "For each rubric dimension, return a structured judgment with two fields:\n"
+    "1. reason: one concise sentence, maximum 25 words, describing the observable "
+    "success or failure in the generated tutor response.\n"
+    "2. passed: the final boolean score.\n"
+    "Do not provide chain-of-thought. Do not explain your reasoning step by step. "
+    "Only provide short observable diagnostic reasons inside the structured tool output."
 )
 
 
@@ -49,7 +53,7 @@ class ClaudeRubricJudge:
                 {
                     "name": "mrbench_evaluation",
                     "description": (
-                        "Record binary pass/fail scores for each MRBench "
+                        "Record structured diagnostic judgments for each MRBench "
                         "pedagogical dimension."
                     ),
                     "input_schema": MRBenchEvaluation.model_json_schema(),

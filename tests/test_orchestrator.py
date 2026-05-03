@@ -9,15 +9,22 @@ from claude_behavior_eval.schemas import DatasetItem, EvaluationResult, MRBenchE
 
 ACTOR_SYSTEM_PROMPT = "You are a helpful academic tutor."
 
+_R = "Dummy reason."
+
+
+def _dim(passed: bool) -> dict:
+    return {"reason": _R, "passed": passed}
+
+
 VALID_SCORES = MRBenchEvaluation(
-    mistake_identification=True,
-    mistake_location=True,
-    answer_revealing_appropriate=False,
-    providing_guidance=True,
-    actionability=True,
-    coherence=True,
-    tutor_tone=True,
-    human_likeness=False,
+    mistake_identification=_dim(True),
+    mistake_location=_dim(True),
+    answer_revealing_appropriate=_dim(False),
+    providing_guidance=_dim(True),
+    actionability=_dim(True),
+    coherence=_dim(True),
+    tutor_tone=_dim(True),
+    human_likeness=_dim(False),
 )
 
 ITEM_NO_CONSTRAINTS = DatasetItem(

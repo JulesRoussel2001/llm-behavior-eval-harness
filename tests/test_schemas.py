@@ -1,17 +1,29 @@
 import pytest
 from pydantic import ValidationError
 
-from claude_behavior_eval.schemas import DatasetItem, EvaluationResult, MRBenchEvaluation
+from claude_behavior_eval.schemas import (
+    DatasetItem,
+    DimensionJudgment,
+    EvaluationResult,
+    MRBenchEvaluation,
+)
+
+_R = "Dummy reason."
+
+
+def _dim(passed: bool) -> dict:
+    return {"reason": _R, "passed": passed}
+
 
 VALID_MRBENCH = dict(
-    mistake_identification=True,
-    mistake_location=False,
-    answer_revealing_appropriate=True,
-    providing_guidance=True,
-    actionability=False,
-    coherence=True,
-    tutor_tone=True,
-    human_likeness=False,
+    mistake_identification=_dim(True),
+    mistake_location=_dim(False),
+    answer_revealing_appropriate=_dim(True),
+    providing_guidance=_dim(True),
+    actionability=_dim(False),
+    coherence=_dim(True),
+    tutor_tone=_dim(True),
+    human_likeness=_dim(False),
 )
 
 VALID_DATASET_ITEM = dict(
@@ -30,17 +42,54 @@ VALID_RESULT = dict(
 )
 
 
+class TestDimensionJudgment:
+    def test_valid_instantiation(self):
+        obj = DimensionJudgment(reason="Response was coherent.", passed=True)
+        assert obj.passed is True
+        assert obj.reason == "Response was coherent."
+
+    def test_valid_from_dict(self):
+        obj = DimensionJudgment(**{"reason": "No error located.", "passed": False})
+        assert obj.passed is False
+
+    def test_rejects_int_for_passed_in_strict_mode(self):
+        with pytest.raises(ValidationError):
+            DimensionJudgment(reason=_R, passed=1)
+
+    def test_rejects_string_for_passed(self):
+        with pytest.raises(ValidationError):
+            DimensionJudgment(reason=_R, passed="yes")
+
+    def test_rejects_reason_longer_than_25_words(self):
+        long_reason = " ".join(["word"] * 26)
+        with pytest.raises(ValidationError):
+            DimensionJudgment(reason=long_reason, passed=True)
+
+    def test_accepts_reason_of_exactly_25_words(self):
+        reason = " ".join(["word"] * 25)
+        obj = DimensionJudgment(reason=reason, passed=True)
+        assert obj.passed is True
+
+    def test_accepts_reason_under_25_words(self):
+        obj = DimensionJudgment(reason="Short reason.", passed=False)
+        assert obj.passed is False
+
+
 class TestMRBenchEvaluation:
     def test_valid_instantiation(self):
         obj = MRBenchEvaluation(**VALID_MRBENCH)
-        assert obj.mistake_identification is True
-        assert obj.human_likeness is False
+        assert obj.mistake_identification.passed is True
+        assert obj.human_likeness.passed is False
 
-    def test_rejects_string_for_bool(self):
+    def test_dimension_has_reason(self):
+        obj = MRBenchEvaluation(**VALID_MRBENCH)
+        assert obj.coherence.reason == _R
+
+    def test_rejects_plain_string_for_dimension(self):
         with pytest.raises(ValidationError):
             MRBenchEvaluation(**{**VALID_MRBENCH, "coherence": "yes"})
 
-    def test_rejects_int_for_bool_in_strict_mode(self):
+    def test_rejects_plain_int_for_dimension(self):
         with pytest.raises(ValidationError):
             MRBenchEvaluation(**{**VALID_MRBENCH, "tutor_tone": 1})
 
@@ -48,6 +97,11 @@ class TestMRBenchEvaluation:
         data = {k: v for k, v in VALID_MRBENCH.items() if k != "actionability"}
         with pytest.raises(ValidationError):
             MRBenchEvaluation(**data)
+
+    def test_accepts_dimension_judgment_instance(self):
+        dj = DimensionJudgment(reason="Correct identification.", passed=True)
+        obj = MRBenchEvaluation(**{**VALID_MRBENCH, "mistake_identification": dj})
+        assert obj.mistake_identification.passed is True
 
 
 class TestDatasetItem:
@@ -79,7 +133,7 @@ class TestEvaluationResult:
         scores = MRBenchEvaluation(**VALID_MRBENCH)
         obj = EvaluationResult(**{**VALID_RESULT, "judge_scores": scores})
         assert isinstance(obj.judge_scores, MRBenchEvaluation)
-        assert obj.judge_scores.mistake_identification is True
+        assert obj.judge_scores.mistake_identification.passed is True
 
     def test_rejects_invalid_judge_scores_type(self):
         with pytest.raises(ValidationError):

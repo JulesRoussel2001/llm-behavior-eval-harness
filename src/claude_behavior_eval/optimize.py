@@ -44,7 +44,7 @@ def calculate_metrics(jsonl_path: Path) -> dict[str, float]:
         count = 0
         for r in rows:
             scores = r.get("judge_scores")
-            if scores is not None and scores.get(dim, False):
+            if scores is not None and scores.get(dim, {}).get("passed", False):
                 count += 1
         metrics[f"{dim}_pass_rate"] = (count / total) * 100.0
 

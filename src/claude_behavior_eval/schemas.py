@@ -1,28 +1,47 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class MRBenchEvaluation(BaseModel):
-    """Binary rubric scores across the 8 MRBench-inspired pedagogical dimensions.
-
-    This model defines the strict JSON output schema for a frozen, rubric-based LLM
-    judge. The judge is a validated proxy evaluator, not an objective ground truth:
-    its scores approximate human expert judgment under the MRBench academic-tutoring
-    taxonomy and should be interpreted accordingly. Each field is a binary pass/fail
-    verdict for the corresponding dimension.
-    """
+class DimensionJudgment(BaseModel):
+    """Structured judgment for a single MRBench pedagogical dimension."""
 
     model_config = ConfigDict(strict=True)
 
-    mistake_identification: bool
-    mistake_location: bool
-    answer_revealing_appropriate: bool
-    providing_guidance: bool
-    actionability: bool
-    coherence: bool
-    tutor_tone: bool
-    human_likeness: bool
+    reason: str = Field(
+        description=(
+            "A single concise diagnostic sentence, maximum 25 words, "
+            "describing the observable success or failure."
+        )
+    )
+    passed: bool
+
+    @field_validator("reason")
+    @classmethod
+    def reason_max_25_words(cls, v: str) -> str:
+        if len(v.split()) > 25:
+            raise ValueError("reason must be 25 words or fewer")
+        return v
+
+
+class MRBenchEvaluation(BaseModel):
+    """Structured diagnostic judgments across the 8 MRBench-inspired pedagogical dimensions.
+
+    This model defines the strict JSON output schema for a frozen, rubric-based LLM
+    judge. The judge is a validated proxy evaluator, not an objective ground truth:
+    its scores approximate expert human judgment under the MRBench academic-tutoring
+    taxonomy and should be interpreted accordingly. Each field returns a DimensionJudgment
+    containing a short observable diagnostic reason and a binary pass/fail verdict.
+    """
+
+    mistake_identification: DimensionJudgment
+    mistake_location: DimensionJudgment
+    answer_revealing_appropriate: DimensionJudgment
+    providing_guidance: DimensionJudgment
+    actionability: DimensionJudgment
+    coherence: DimensionJudgment
+    tutor_tone: DimensionJudgment
+    human_likeness: DimensionJudgment
 
 
 class DatasetItem(BaseModel):

@@ -15,8 +15,12 @@ from claude_behavior_eval.schemas import MRBenchEvaluation
 
 _JUDGE_DIMENSIONS = list(MRBenchEvaluation.model_fields.keys())
 
-_ALL_TRUE_SCORES = {dim: True for dim in _JUDGE_DIMENSIONS}
-_ALL_FALSE_SCORES = {dim: False for dim in _JUDGE_DIMENSIONS}
+_R = "Dummy reason."
+_DIM_TRUE = {"reason": _R, "passed": True}
+_DIM_FALSE = {"reason": _R, "passed": False}
+
+_ALL_TRUE_SCORES = {dim: _DIM_TRUE for dim in _JUDGE_DIMENSIONS}
+_ALL_FALSE_SCORES = {dim: _DIM_FALSE for dim in _JUDGE_DIMENSIONS}
 
 
 def _make_jsonl_row(item_id: str, det_passed: bool, scores: dict | None) -> str:
@@ -95,6 +99,17 @@ class TestCalculateMetrics:
         for dim in _JUDGE_DIMENSIONS:
             assert f"{dim}_pass_rate" in result
 
+    def test_nested_passed_field_is_used(self, tmp_path: Path):
+        # Only "passed" inside the nested dict should count, not the dict itself
+        scores = {dim: _DIM_FALSE for dim in _JUDGE_DIMENSIONS}
+        path = tmp_path / "all_false.jsonl"
+        path.write_text(
+            _make_jsonl_row("item-001", det_passed=True, scores=scores) + "\n",
+            encoding="utf-8",
+        )
+        result = calculate_metrics(path)
+        assert result["judge_macro_pass_rate"] == 0.0
+
 
 class TestGenerateImprovedPrompt:
     def _make_client(self, text: str) -> MagicMock:
@@ -152,12 +167,6 @@ class TestGenerateImprovedPrompt:
 
 
 class TestRunOptimizationLoop:
-    def _patched_loop(self, tmp_path: Path, iterations: int = 2, improved: str = "Improved."):
-        return patch("claude_behavior_eval.optimize.Anthropic"), \
-               patch("claude_behavior_eval.optimize.run_evaluation"), \
-               patch("claude_behavior_eval.optimize.calculate_metrics", return_value={"judge_macro_pass_rate": 60.0}), \
-               patch("claude_behavior_eval.optimize.generate_improved_prompt", return_value=improved)
-
     def test_run_evaluation_called_once_per_iteration(self, tmp_path: Path):
         with (
             patch("claude_behavior_eval.optimize.Anthropic"),

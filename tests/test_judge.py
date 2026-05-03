@@ -16,15 +16,22 @@ VALID_ITEM = DatasetItem(
     expected_rubric={"mistake_identification": "Student conflates roots with y-intercept"},
 )
 
-VALID_SCORES: dict[str, bool] = {
-    "mistake_identification": True,
-    "mistake_location": False,
-    "answer_revealing_appropriate": True,
-    "providing_guidance": True,
-    "actionability": False,
-    "coherence": True,
-    "tutor_tone": True,
-    "human_likeness": False,
+_R = "Dummy reason."
+
+
+def _dim(passed: bool) -> dict:
+    return {"reason": _R, "passed": passed}
+
+
+VALID_SCORES: dict = {
+    "mistake_identification": _dim(True),
+    "mistake_location": _dim(False),
+    "answer_revealing_appropriate": _dim(True),
+    "providing_guidance": _dim(True),
+    "actionability": _dim(False),
+    "coherence": _dim(True),
+    "tutor_tone": _dim(True),
+    "human_likeness": _dim(False),
 }
 
 
@@ -62,9 +69,15 @@ class TestEvaluateResponseSuccess:
         client = _make_client([_make_tool_use_block()])
         judge = ClaudeRubricJudge(client=client)
         result = judge.evaluate_response(VALID_ITEM, "Let's think about the discriminant.")
-        assert result.mistake_identification is True
-        assert result.mistake_location is False
-        assert result.human_likeness is False
+        assert result.mistake_identification.passed is True
+        assert result.mistake_location.passed is False
+        assert result.human_likeness.passed is False
+
+    def test_dimension_reason_propagated(self):
+        client = _make_client([_make_tool_use_block()])
+        judge = ClaudeRubricJudge(client=client)
+        result = judge.evaluate_response(VALID_ITEM, "Let's think about the discriminant.")
+        assert result.coherence.reason == _R
 
     def test_finds_tool_block_among_multiple_content_blocks(self):
         client = _make_client([_make_text_block(), _make_tool_use_block()])
