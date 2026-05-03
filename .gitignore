@@ -2,3 +2,17 @@
 __pycache__/
 .pytest_cache/
 .env
+Datasets
+data/raw_mrbench/
+data/processed_mrbench/
+
+# Optimization & Evaluation Runs
+optimization_runs/
+*.jsonl
+
+# Reports (Optional: comment this out if you WANT to save the final markdown report to github)
+final_results.md
+
+# Python caches (if not already there)
+__pycache__/
+.pytest_cache/
