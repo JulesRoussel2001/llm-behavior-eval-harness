@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-# Centralized so the judge model can be pinned or updated in one place
-# rather than scattered across the codebase.
+# Actor and judge model IDs are centralized here for easy pinning or updating.
 DEFAULT_JUDGE_MODEL: str = "claude-3-5-sonnet-latest"
+DEFAULT_ACTOR_MODEL: str = "claude-3-5-haiku-latest"
