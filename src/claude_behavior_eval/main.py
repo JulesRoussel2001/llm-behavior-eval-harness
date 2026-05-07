@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv()
 
 from claude_behavior_eval.config import DEFAULT_ACTOR_MODEL, DEFAULT_JUDGE_MODEL
 from claude_behavior_eval.dataset import CSVDatasetLoader

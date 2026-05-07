@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from claude_behavior_eval.prepare_mrbench import _CSV_FIELDNAMES, prepare_mrbench_csvs
+from claude_behavior_eval.prepare_mrbench import (
+    _CSV_FIELDNAMES,
+    _VALIDATION_FIELDNAMES,
+    prepare_mrbench_csvs,
+)
 
 _FAKE_ITEMS = [
     {
@@ -261,3 +265,301 @@ class TestTargetLearnerLevel:
 def _read_csv(path: Path) -> list[dict]:
     with path.open(encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and data for judge_validation_raw.csv tests
+# ---------------------------------------------------------------------------
+
+_FAKE_ITEMS_WITH_RESPONSES = [
+    {
+        "conversation_id": "conv-vld-001",
+        "conversation_history": "Tutor: What is two plus two?\nStudent: It is five.",
+        "Data": "FakeMath",
+        "Topic": "Arithmetic",
+        "Ground_Truth_Solution": "GOLD: two plus two equals four",
+        "anno_llm_responses": {
+            "ModelA": {
+                "response": "Good try! The answer is actually four, not five.",
+                "annotation": {
+                    "Mistake_Identification": "Yes",
+                    "Mistake_Location": "Yes",
+                    "Revealing_of_the_Answer": "Yes",   # inverted → "No"
+                    "Providing_Guidance": "Yes",
+                    "Actionability": "Yes",
+                    "Coherence": "Yes",
+                    "Tutor_Tone": "Encouraging",         # not Yes/No → ""
+                    "humanlikeness": "Yes",
+                },
+            },
+            "ModelB": {
+                "response": "Think about what comes after three.",
+                "annotation": {
+                    "Mistake_Identification": "Yes",
+                    "Mistake_Location": "No",
+                    "Revealing_of_the_Answer": "No",     # inverted → "Yes"
+                    "Providing_Guidance": "Yes",
+                    "Actionability": "No",
+                    "Coherence": "Yes",
+                    "Tutor_Tone": "Neutral",             # not Yes/No → ""
+                    "humanlikeness": "Yes",
+                },
+            },
+        },
+    },
+    {
+        "conversation_id": "conv-vld-002",
+        "conversation_history": "Tutor: Solve x+3=7.\nStudent: x equals three.",
+        "Data": "FakeMath",
+        "Topic": "Not Available",
+        "Ground_Truth_Solution": "GOLD: x equals four",
+        "anno_llm_responses": {},   # no responses → no validation rows
+    },
+]
+
+
+@pytest.fixture()
+def fake_json_with_responses(tmp_path: Path) -> Path:
+    path = tmp_path / "fake_mrbench_responses.json"
+    path.write_text(json.dumps(_FAKE_ITEMS_WITH_RESPONSES), encoding="utf-8")
+    return path
+
+
+@pytest.fixture()
+def output_dir_vld(tmp_path: Path) -> Path:
+    return tmp_path / "processed_vld"
+
+
+class TestJudgeValidationCSVCreated:
+    def test_file_is_created(self, fake_json: Path, output_dir: Path):
+        prepare_mrbench_csvs(fake_json, output_dir)
+        assert (output_dir / "judge_validation_raw.csv").exists()
+
+    def test_has_required_columns(self, fake_json_with_responses: Path, output_dir_vld: Path):
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        with (output_dir_vld / "judge_validation_raw.csv").open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            assert list(reader.fieldnames) == _VALIDATION_FIELDNAMES
+
+    def test_row_count_matches_model_count(self, fake_json_with_responses: Path, output_dir_vld: Path):
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        rows = _read_csv(output_dir_vld / "judge_validation_raw.csv")
+        # conv-vld-001 has 2 models, conv-vld-002 has 0 → total 2 rows
+        assert len(rows) == 2
+
+    def test_has_nonempty_tutor_response(self, fake_json_with_responses: Path, output_dir_vld: Path):
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        rows = _read_csv(output_dir_vld / "judge_validation_raw.csv")
+        assert any(r["tutor_response"].strip() for r in rows)
+
+    def test_dev_and_test_still_created(self, fake_json_with_responses: Path, output_dir_vld: Path):
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        assert (output_dir_vld / "dev.csv").exists()
+        assert (output_dir_vld / "test.csv").exists()
+
+    def test_split_metadata_still_created(self, fake_json_with_responses: Path, output_dir_vld: Path):
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        assert (output_dir_vld / "split_metadata.json").exists()
+
+
+class TestJudgeValidationCSVLabels:
+    def _get_row(self, rows: list[dict], model_suffix: str) -> dict:
+        for r in rows:
+            if r["id"].endswith(f"_{model_suffix}"):
+                return r
+        raise KeyError(model_suffix)
+
+    def _rows(self, fake_json_with_responses: Path, output_dir_vld: Path) -> list[dict]:
+        prepare_mrbench_csvs(fake_json_with_responses, output_dir_vld)
+        return _read_csv(output_dir_vld / "judge_validation_raw.csv")
+
+    def test_answer_revealing_yes_inverted_to_no(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelA")
+        # MRBench "Yes" (revealed answer) → human_answer_revealing_appropriate = "No"
+        assert row["human_answer_revealing_appropriate"] == "No"
+
+    def test_answer_revealing_no_inverted_to_yes(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelB")
+        # MRBench "No" (did not reveal answer) → human_answer_revealing_appropriate = "Yes"
+        assert row["human_answer_revealing_appropriate"] == "Yes"
+
+    def test_tutor_tone_stored_categorically(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        # Tutor_Tone is stored as-is (Encouraging/Neutral/Offensive), not mapped to Yes/No
+        row_a = self._get_row(rows, "ModelA")
+        row_b = self._get_row(rows, "ModelB")
+        assert row_a["human_tutor_tone"] == "Encouraging"
+        assert row_b["human_tutor_tone"] == "Neutral"
+
+    def test_standard_yes_preserved_for_noninverted_dim(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelA")
+        assert row["human_mistake_identification"] == "Yes"
+
+    def test_standard_no_preserved_for_noninverted_dim(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelB")
+        assert row["human_mistake_location"] == "No"
+
+    def test_row_id_contains_model_name(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        ids = {r["id"] for r in rows}
+        assert any("ModelA" in i for i in ids)
+        assert any("ModelB" in i for i in ids)
+
+    def test_student_question_matches_conversation_history(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelA")
+        assert "two plus two" in row["student_question"]
+
+    def test_target_learner_level_from_topic(
+        self, fake_json_with_responses: Path, output_dir_vld: Path
+    ):
+        rows = self._rows(fake_json_with_responses, output_dir_vld)
+        row = self._get_row(rows, "ModelA")
+        assert row["target_learner_level"] == "Arithmetic"
+
+
+# ---------------------------------------------------------------------------
+# Tests for qualified "Yes (...)" Revealing_of_the_Answer normalization
+# ---------------------------------------------------------------------------
+
+_FAKE_ITEMS_QUALIFIED_REVEALING = [
+    {
+        "conversation_id": "conv-rev-001",
+        "conversation_history": "Tutor: What is 2+2?\nStudent: It is five.",
+        "Data": "FakeMath",
+        "Topic": "Arithmetic",
+        "Ground_Truth_Solution": "GOLD: four",
+        "anno_llm_responses": {
+            # Plain "No": tutor did NOT reveal → appropriate → "Yes" (after inversion)
+            "ModelNo": {
+                "response": "Think about it again.",
+                "annotation": {
+                    "Mistake_Identification": "Yes",
+                    "Mistake_Location": "Yes",
+                    "Revealing_of_the_Answer": "No",
+                    "Providing_Guidance": "Yes",
+                    "Actionability": "Yes",
+                    "Coherence": "Yes",
+                    "Tutor_Tone": "Encouraging",
+                    "humanlikeness": "Yes",
+                },
+            },
+            # "Yes (and the answer is correct)": tutor revealed correctly → NOT appropriate → "No"
+            "ModelYesCorrect": {
+                "response": "The answer is four.",
+                "annotation": {
+                    "Mistake_Identification": "Yes",
+                    "Mistake_Location": "Yes",
+                    "Revealing_of_the_Answer": "Yes (and the answer is correct)",
+                    "Providing_Guidance": "Yes",
+                    "Actionability": "Yes",
+                    "Coherence": "Yes",
+                    "Tutor_Tone": "Neutral",
+                    "humanlikeness": "Yes",
+                },
+            },
+            # "Yes (but the answer is incorrect)": tutor revealed incorrectly → NOT appropriate → "No"
+            "ModelYesWrong": {
+                "response": "The answer is three.",
+                "annotation": {
+                    "Mistake_Identification": "No",
+                    "Mistake_Location": "No",
+                    "Revealing_of_the_Answer": "Yes (but the answer is incorrect)",
+                    "Providing_Guidance": "No",
+                    "Actionability": "No",
+                    "Coherence": "No",
+                    "Tutor_Tone": "Neutral",
+                    "humanlikeness": "No",
+                },
+            },
+        },
+    },
+]
+
+
+@pytest.fixture()
+def fake_json_qualified_revealing(tmp_path: Path) -> Path:
+    path = tmp_path / "fake_qualified_revealing.json"
+    path.write_text(json.dumps(_FAKE_ITEMS_QUALIFIED_REVEALING), encoding="utf-8")
+    return path
+
+
+class TestRevealingAnswerNormalization:
+    """Tests for the Revealing_of_the_Answer → human_answer_revealing_appropriate mapping.
+
+    MRBench uses three qualified values for Revealing_of_the_Answer:
+      "No"                              → appropriate → "Yes" (after inversion)
+      "Yes (and the answer is correct)" → revealed    → "No"  (after inversion)
+      "Yes (but the answer is incorrect)"→ revealed   → "No"  (after inversion)
+
+    The previous normalizer only recognized exact "Yes", mapping the two qualified
+    forms to empty string. The fix treats any value starting with "Yes" as revealing.
+    """
+
+    def _get(self, rows: list[dict], suffix: str) -> dict:
+        for r in rows:
+            if r["id"].endswith(f"_{suffix}"):
+                return r
+        raise KeyError(suffix)
+
+    def _rows(self, fake_json_qualified_revealing: Path, tmp_path: Path) -> list[dict]:
+        out = tmp_path / "out_rev"
+        prepare_mrbench_csvs(fake_json_qualified_revealing, out)
+        return _read_csv(out / "judge_validation_raw.csv")
+
+    def test_plain_no_inverted_to_yes(
+        self, fake_json_qualified_revealing: Path, tmp_path: Path
+    ):
+        rows = self._rows(fake_json_qualified_revealing, tmp_path)
+        row = self._get(rows, "ModelNo")
+        assert row["human_answer_revealing_appropriate"] == "Yes"
+
+    def test_yes_and_correct_inverted_to_no(
+        self, fake_json_qualified_revealing: Path, tmp_path: Path
+    ):
+        # "Yes (and the answer is correct)" means the tutor revealed the answer.
+        # Revealing is pedagogically bad → mapped to "No" (not appropriate).
+        rows = self._rows(fake_json_qualified_revealing, tmp_path)
+        row = self._get(rows, "ModelYesCorrect")
+        assert row["human_answer_revealing_appropriate"] == "No"
+
+    def test_yes_but_wrong_inverted_to_no(
+        self, fake_json_qualified_revealing: Path, tmp_path: Path
+    ):
+        # "Yes (but the answer is incorrect)" → still revealing → "No".
+        rows = self._rows(fake_json_qualified_revealing, tmp_path)
+        row = self._get(rows, "ModelYesWrong")
+        assert row["human_answer_revealing_appropriate"] == "No"
+
+    def test_three_rows_generated(
+        self, fake_json_qualified_revealing: Path, tmp_path: Path
+    ):
+        rows = self._rows(fake_json_qualified_revealing, tmp_path)
+        assert len(rows) == 3
+
+    def test_tutor_tone_still_categorical(
+        self, fake_json_qualified_revealing: Path, tmp_path: Path
+    ):
+        rows = self._rows(fake_json_qualified_revealing, tmp_path)
+        row = self._get(rows, "ModelNo")
+        assert row["human_tutor_tone"] == "Encouraging"
+        row2 = self._get(rows, "ModelYesCorrect")
+        assert row2["human_tutor_tone"] == "Neutral"

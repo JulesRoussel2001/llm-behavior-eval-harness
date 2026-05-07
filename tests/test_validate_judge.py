@@ -11,6 +11,7 @@ from claude_behavior_eval.schemas import MRBenchEvaluation
 from claude_behavior_eval.validate_judge import (
     compute_binary_metrics,
     parse_human_label,
+    parse_tone_label,
     validate_judge,
 )
 
@@ -56,7 +57,11 @@ def _default_row(
     }
     overrides = human_values or {}
     for dim in _DIMS:
-        row[f"human_{dim}"] = overrides.get(dim, "Yes")
+        if dim == "tutor_tone":
+            # tutor_tone uses Encouraging/Neutral (not Yes/No) — default to Encouraging=True
+            row[f"human_{dim}"] = overrides.get(dim, "Encouraging")
+        else:
+            row[f"human_{dim}"] = overrides.get(dim, "Yes")
     return row
 
 
@@ -84,6 +89,35 @@ class TestParseHumanLabel:
     def test_raises_for_whitespace_only(self):
         with pytest.raises(ValueError):
             parse_human_label("   ")
+
+
+class TestParseToneLabel:
+    def test_encouraging_is_true(self):
+        assert parse_tone_label("Encouraging") is True
+
+    def test_neutral_is_false(self):
+        assert parse_tone_label("Neutral") is False
+
+    def test_offensive_raises_value_error(self):
+        with pytest.raises(ValueError, match="Offensive"):
+            parse_tone_label("Offensive")
+
+    def test_empty_raises_value_error(self):
+        with pytest.raises(ValueError):
+            parse_tone_label("")
+
+    def test_yes_raises_value_error(self):
+        # Yes/No are not valid tone labels
+        with pytest.raises(ValueError):
+            parse_tone_label("Yes")
+
+    def test_unknown_raises_value_error(self):
+        with pytest.raises(ValueError):
+            parse_tone_label("Sarcastic")
+
+    def test_strips_whitespace(self):
+        assert parse_tone_label("  Encouraging  ") is True
+        assert parse_tone_label("  Neutral  ") is False
 
 
 class TestComputeBinaryMetrics:
@@ -199,7 +233,7 @@ class TestValidateJudge:
             assert dim in content
 
     def test_metrics_perfect_agreement(self, tmp_path: Path):
-        # Human: all Yes (True), Judge: all True → 100% across the board
+        # Human: Yes/Encouraging (all True), Judge: all True → 100% agreement
         rows = [_default_row("item-1"), _default_row("item-2")]
         input_csv = _make_csv(tmp_path, rows)
         output_jsonl = tmp_path / "results.jsonl"
@@ -243,7 +277,7 @@ class TestValidateJudge:
             assert record["judge_reasons"][dim] == f"Reason for {dim}."
 
     def test_disagreement_examples_appear_in_report(self, tmp_path: Path):
-        # Human: all True, Judge: mistake_identification=False → disagreement
+        # Human: all True (Yes/Encouraging), Judge: mistake_identification=False → disagreement
         rows = [
             _default_row("item-A"),
             _default_row("item-B"),
@@ -256,7 +290,6 @@ class TestValidateJudge:
         validate_judge(input_csv, output_jsonl, report_md, judge=judge)
 
         content = report_md.read_text(encoding="utf-8")
-        # At least one of the disagreeing items must appear in the report
         assert "item-A" in content or "item-B" in content
 
     def test_unknown_human_label_raises_value_error(self, tmp_path: Path):
@@ -269,6 +302,42 @@ class TestValidateJudge:
 
         with pytest.raises(ValueError):
             validate_judge(input_csv, output_jsonl, report_md, judge=self._make_judge())
+
+    def test_invalid_tutor_tone_raises_value_error(self, tmp_path: Path):
+        # Offensive must be filtered before validate_judge is called
+        bad_row = _default_row("item-bad")
+        bad_row["human_tutor_tone"] = "Offensive"
+
+        input_csv = _make_csv(tmp_path, [bad_row])
+        output_jsonl = tmp_path / "results.jsonl"
+        report_md = tmp_path / "report.md"
+
+        with pytest.raises(ValueError, match="Offensive"):
+            validate_judge(input_csv, output_jsonl, report_md, judge=self._make_judge())
+
+    def test_tutor_tone_encouraging_maps_to_true(self, tmp_path: Path):
+        rows = [_default_row("item-1", human_values={"tutor_tone": "Encouraging"})]
+        input_csv = _make_csv(tmp_path, rows)
+        output_jsonl = tmp_path / "results.jsonl"
+        report_md = tmp_path / "report.md"
+
+        validate_judge(input_csv, output_jsonl, report_md, judge=self._make_judge())
+
+        record = json.loads(output_jsonl.read_text(encoding="utf-8").splitlines()[0])
+        assert record["human_labels"]["tutor_tone"] is True
+
+    def test_tutor_tone_neutral_maps_to_false(self, tmp_path: Path):
+        rows = [_default_row("item-1", human_values={"tutor_tone": "Neutral"})]
+        input_csv = _make_csv(tmp_path, rows)
+        output_jsonl = tmp_path / "results.jsonl"
+        report_md = tmp_path / "report.md"
+
+        # Judge returns tutor_tone=True (Encouraging); human=Neutral=False → mismatch
+        validate_judge(input_csv, output_jsonl, report_md, judge=self._make_judge())
+
+        record = json.loads(output_jsonl.read_text(encoding="utf-8").splitlines()[0])
+        assert record["human_labels"]["tutor_tone"] is False
+        assert record["matches"]["tutor_tone"] is False
 
     def test_instantiates_judge_when_none(self, tmp_path: Path):
         rows = [_default_row("item-1")]
@@ -283,7 +352,7 @@ class TestValidateJudge:
             MockJudge.assert_called_once()
 
     def test_matches_reflect_agreement(self, tmp_path: Path):
-        # Human: mistake_identification=No (False), Judge: mistake_identification=True → mismatch
+        # Human: mistake_identification=No (False), judge=True → mismatch; all others match
         rows = [_default_row("item-1", human_values={"mistake_identification": "No"})]
         input_csv = _make_csv(tmp_path, rows)
         output_jsonl = tmp_path / "results.jsonl"
@@ -293,7 +362,6 @@ class TestValidateJudge:
 
         record = json.loads(output_jsonl.read_text(encoding="utf-8").splitlines()[0])
         assert record["matches"]["mistake_identification"] is False
-        # All other dims: human=Yes(True), judge=True → match
         for dim in _DIMS:
             if dim != "mistake_identification":
                 assert record["matches"][dim] is True

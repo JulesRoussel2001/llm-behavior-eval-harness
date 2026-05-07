@@ -32,6 +32,12 @@ class MRBenchEvaluation(BaseModel):
     its scores approximate expert human judgment under the MRBench academic-tutoring
     taxonomy and should be interpreted accordingly. Each field returns a DimensionJudgment
     containing a short observable diagnostic reason and a binary pass/fail verdict.
+
+    Note on tutor_tone: MRBench Tutor_Tone is categorical (Encouraging/Neutral/Offensive).
+    For quantitative evaluation this is reformulated as a binary Encouraging-vs-Neutral
+    metric. passed=True means the tutor's tone is encouraging; passed=False means the
+    tone is neutral/not encouraging. False does NOT mean bad or offensive. Offensive
+    examples are excluded from validation splits due to insufficient support.
     """
 
     mistake_identification: DimensionJudgment
@@ -40,6 +46,7 @@ class MRBenchEvaluation(BaseModel):
     providing_guidance: DimensionJudgment
     actionability: DimensionJudgment
     coherence: DimensionJudgment
+    # passed=True: encouraging tone; passed=False: neutral (not encouraging). Not a safety label.
     tutor_tone: DimensionJudgment
     human_likeness: DimensionJudgment
 

@@ -16,12 +16,36 @@ _FALSE_LABELS = {"No", "no", "FALSE", "false", "0"}
 
 
 def parse_human_label(value: str) -> bool:
+    """Parse a boolean Yes/No human annotation label to bool."""
     normalized = value.strip()
     if normalized in _TRUE_LABELS:
         return True
     if normalized in _FALSE_LABELS:
         return False
     raise ValueError(f"Unknown human label: {value!r}")
+
+
+def parse_tone_label(value: str) -> bool:
+    """Convert a MRBench categorical Tutor_Tone label to bool for quantitative evaluation.
+
+    MRBench Tutor_Tone is categorical rather than boolean. We preserve the pedagogical
+    distinction between Neutral and Encouraging by reformulating tone as a binary
+    Encouraging-vs-Neutral metric. The single/rare Offensive class is excluded from the
+    quantitative split because it has insufficient support for reliable Macro-F1 evaluation.
+    Therefore: Encouraging=True (active encouragement), Neutral=False (not encouraging).
+    False does NOT mean bad or offensive — it means the tone is neutral/not encouraging.
+
+    Offensive labels must be filtered out by 01_create_splits.py before reaching this function.
+    """
+    v = value.strip()
+    if v == "Encouraging":
+        return True
+    if v == "Neutral":
+        return False
+    raise ValueError(
+        f"Unknown or excluded tutor_tone label: {value!r}. "
+        "Offensive examples must be filtered out before running validate_judge."
+    )
 
 
 def compute_binary_metrics(y_true: list[bool], y_pred: list[bool]) -> dict[str, float]:
@@ -44,6 +68,13 @@ def compute_binary_metrics(y_true: list[bool], y_pred: list[bool]) -> dict[str, 
 
 # Each entry: (human_val, judge_val, item_id, judge_reason, tutor_response_excerpt)
 _DimEntry = tuple[bool, bool, str, str, str]
+
+
+def _parse_dim_label(dim: str, value: str) -> bool:
+    """Dispatch to the correct label parser based on dimension name."""
+    if dim == "tutor_tone":
+        return parse_tone_label(value)
+    return parse_human_label(value)
 
 
 def validate_judge(
@@ -86,7 +117,7 @@ def validate_judge(
             matches: dict[str, bool] = {}
 
             for dim in _JUDGE_DIMENSIONS:
-                human_val = parse_human_label(row[f"human_{dim}"])
+                human_val = _parse_dim_label(dim, row[f"human_{dim}"])
                 judgment = getattr(evaluation, dim)
                 judge_val: bool = judgment.passed
                 reason: str = judgment.reason
@@ -136,7 +167,11 @@ def validate_judge(
     print(f"  Macro Accuracy: {macro_accuracy:.1f}%")
     print("  Per-dimension F1:")
     for dim in _JUDGE_DIMENSIONS:
-        print(f"    {dim}: {per_dimension[dim]['f1']:.1f}%")
+        vals = [e[0] for e in dim_data[dim]]
+        n_true = sum(vals)
+        n_false = len(vals) - n_true
+        balance_warn = "  ⚠️  single-class" if n_true == 0 or n_false == 0 else ""
+        print(f"    {dim}: {per_dimension[dim]['f1']:.1f}%{balance_warn}")
 
     return metrics
 

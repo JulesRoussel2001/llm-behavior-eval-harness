@@ -1,18 +1,38 @@
+# Virtual environments
 .venv/
+venv/
+
+# Python caches
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / environment variables
 .env
-Datasets
+.env.*
+!.env.example
+
+# Raw and processed datasets
 data/raw_mrbench/
 data/processed_mrbench/
 
-# Optimization & Evaluation Runs
+# Optimization and evaluation runs
 optimization_runs/
 *.jsonl
 
-# Reports (Optional: comment this out if you WANT to save the final markdown report to github)
+# Generated reports and results
+mini_results.md
 final_results.md
+reports/
+results/
+outputs/
 
-# Python caches (if not already there)
-__pycache__/
-.pytest_cache/
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log

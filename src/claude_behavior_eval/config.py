@@ -1,4 +1,6 @@
 from __future__ import annotations
+from dotenv import load_dotenv
+load_dotenv()
 
 # Actor, judge, and optimizer model IDs are centralized here for easy pinning or updating.
 DEFAULT_JUDGE_MODEL: str = "claude-haiku-4-5-20251001"
