@@ -1,38 +1,39 @@
-# Virtual environments
-.venv/
-venv/
-
-# Python caches
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# Secrets / environment variables
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
 .env
 .env.*
-!.env.example
+*.key
 
-# Raw and processed datasets
-data/raw_mrbench/
-data/processed_mrbench/
-
-# Optimization and evaluation runs
-optimization_runs/
-*.jsonl
-
-# Generated reports and results
-mini_results.md
-final_results.md
-reports/
-results/
-outputs/
-
-# OS / editor files
+# OS / editor
 .DS_Store
 .vscode/
 .idea/
+
+# Generated outputs
+*.jsonl
+*_results.jsonl
+*_report.md
+optimization_runs/
+reports/
+
+# Processed data generated from raw benchmark
+data/processed_mrbench/
+
+# Raw benchmark data (not redistributable; place locally before running Step 1)
+data/raw_mrbench/
 
 # Logs
 *.log

@@ -6,6 +6,12 @@ Produces three disjoint CSV files from judge_validation_raw.csv:
   judge_dev.csv    - 20 rows (primary evaluation set)
   judge_test.csv   - 10 rows (held-out test set)
 
+All three splits are disjoint both by row ID and by base conversation ID:
+  calibration base IDs ∩ judge_dev base IDs   = 0
+  calibration base IDs ∩ judge_test base IDs  = 0
+  judge_dev base IDs   ∩ judge_test base IDs  = 0
+  No duplicate base IDs within any single split.
+
 Eligibility filter (8 dimensions):
   - 7 boolean dimensions: must have Yes/No (or True/False/1/0)
   - tutor_tone: must be Encouraging or Neutral (Offensive excluded)
@@ -16,7 +22,10 @@ Encouraging-vs-Neutral metric. The single/rare Offensive class is excluded from 
 quantitative split because it has insufficient support for reliable Macro-F1 evaluation.
 Therefore, tutor_tone passed=True means Encouraging, and passed=False means Neutral.
 
-Split construction uses repeated random sampling (MAX_ATTEMPTS attempts, seed 42).
+Split construction groups clean rows by base conversation ID (stripping the _ModelName
+suffix from each row ID). The sampling loop shuffles base conversation IDs rather than
+individual rows, then picks one representative row per base conversation from each pool.
+This guarantees no shared conversation context across splits.
 
 Two-tier coverage strategy:
   STRONG (preferred, 25% minority threshold):
@@ -35,6 +44,7 @@ If neither is found, the best-scored overall split is used with a WARNING.
 import csv
 import random
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 CALIBRATION_SIZE = 3
@@ -67,6 +77,11 @@ DIM_NAMES = [
 ]
 
 _BOOL_VALID = {"yes", "no", "true", "false", "1", "0"}
+
+
+def _base_id(full_id: str) -> str:
+    """Strip _ModelName suffix from a judge-validation row ID."""
+    return full_id.rsplit("_", 1)[0]
 
 
 def _is_clean(row: dict) -> tuple[bool, str]:
@@ -169,17 +184,30 @@ def main() -> None:
             f"ERROR: Need {TOTAL_NEEDED} rows but only {len(clean_rows)} clean rows available."
         )
 
-    clean_bools = [_to_bools(r) for r in clean_rows]
+    # Group clean rows by base conversation ID (strips _ModelName suffix)
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in clean_rows:
+        groups[_base_id(row["id"])].append(row)
+    base_ids = sorted(groups.keys())
+
+    print(f"Distinct base conversation IDs in clean pool: {len(base_ids)}")
+
+    if len(base_ids) < TOTAL_NEEDED:
+        sys.exit(
+            f"ERROR: Need {TOTAL_NEEDED} distinct base conversation IDs but only "
+            f"{len(base_ids)} available."
+        )
 
     # Report pool class balance; warn about impossible constraints
-    print("\nClass balance in clean pool:")
+    all_clean_bools = [_to_bools(r) for r in clean_rows]
+    print("\nClass balance in clean pool (row level):")
     print(f"  {'Dimension':<38} {'True':>6} {'False':>6}")
     print(f"  {'-'*52}")
     impossible_strong: list[str] = []
     impossible_fallback: list[str] = []
     for i, dim in enumerate(DIM_NAMES):
-        t = sum(b[i] for b in clean_bools)
-        f = len(clean_bools) - t
+        t = sum(b[i] for b in all_clean_bools)
+        f = len(all_clean_bools) - t
         print(f"  {dim:<38} {t:>6} {f:>6}")
         if t < 5 or f < 5:
             impossible_strong.append(dim)
@@ -190,51 +218,54 @@ def main() -> None:
     if impossible_fallback:
         print(f"  WARNING: Fallback (≥2) constraint unreachable for: {', '.join(impossible_fallback)}")
 
-    # --- Repeated random sampling ---
-    # Track three candidate splits:
-    #   best_strong   : first split satisfying strong constraints
-    #   best_fallback : first split satisfying fallback constraints
-    #   best_overall  : highest combined coverage score (for last-resort)
-    indices = list(range(len(clean_rows)))
+    # --- Repeated random sampling (base-conversation-level) ---
+    # Each attempt:
+    #   1. Shuffle base_ids
+    #   2. First CALIBRATION_SIZE → calibration pool; next DEV_SIZE → dev pool; next TEST_SIZE → test pool
+    #   3. Pick one representative row per base_id from each pool via rng.choice
+    #   4. Check STRONG then FALLBACK coverage on dev and test
     best_strong: tuple | None = None
     best_fallback: tuple | None = None
     best_overall: tuple | None = None
     best_overall_score = -1
 
     for attempt in range(MAX_ATTEMPTS):
-        idx = indices.copy()
-        rng.shuffle(idx)
+        shuffled_bases = base_ids.copy()
+        rng.shuffle(shuffled_bases)
 
-        cal_i = idx[:CALIBRATION_SIZE]
-        dev_i = idx[CALIBRATION_SIZE:CALIBRATION_SIZE + DEV_SIZE]
-        test_i = idx[CALIBRATION_SIZE + DEV_SIZE:CALIBRATION_SIZE + DEV_SIZE + TEST_SIZE]
+        cal_bases = shuffled_bases[:CALIBRATION_SIZE]
+        dev_bases = shuffled_bases[CALIBRATION_SIZE:CALIBRATION_SIZE + DEV_SIZE]
+        test_bases = shuffled_bases[CALIBRATION_SIZE + DEV_SIZE:CALIBRATION_SIZE + DEV_SIZE + TEST_SIZE]
 
-        dev_b = [clean_bools[i] for i in dev_i]
-        test_b = [clean_bools[i] for i in test_i]
+        calibration = [rng.choice(groups[b]) for b in cal_bases]
+        dev = [rng.choice(groups[b]) for b in dev_bases]
+        test = [rng.choice(groups[b]) for b in test_bases]
+
+        dev_b = [_to_bools(r) for r in dev]
+        test_b = [_to_bools(r) for r in test]
 
         strong_ok = _coverage_ok(dev_b, 5, 5) and _coverage_ok(test_b, 2, 2)
         fallback_ok = _coverage_ok(dev_b, 2, 2) and _coverage_ok(test_b, 1, 1)
 
         if strong_ok:
-            best_strong = (cal_i, dev_i, test_i)
+            best_strong = (calibration, dev, test)
             print(f"\nStrong 25% dev coverage satisfied (attempt {attempt + 1}).")
             break
 
         if fallback_ok and best_fallback is None:
-            best_fallback = (cal_i, dev_i, test_i)
+            best_fallback = (calibration, dev, test)
 
-        # Track best overall by combined coverage score
-        score = (_coverage_score(dev_b, 5, 5) + _coverage_score(test_b, 2, 2))
+        score = _coverage_score(dev_b, 5, 5) + _coverage_score(test_b, 2, 2)
         if score > best_overall_score:
             best_overall_score = score
-            best_overall = (cal_i, dev_i, test_i)
+            best_overall = (calibration, dev, test)
 
     # Choose which split to use
     if best_strong is not None:
-        selected = best_strong
+        selected_cal, selected_dev, selected_test = best_strong
         coverage_label = "STRONG — 25% minority threshold met for all feasible dimensions"
     elif best_fallback is not None:
-        selected = best_fallback
+        selected_cal, selected_dev, selected_test = best_fallback
         coverage_label = "FALLBACK MINIMUM — 25% threshold not achieved; minimum 2T+2F dev / 1T+1F test used"
         print(
             "\nWARNING: Strong 25% dev coverage not fully achieved. "
@@ -244,7 +275,7 @@ def main() -> None:
             print(f"  Dimensions blocking strong coverage: {', '.join(impossible_strong)}")
     else:
         assert best_overall is not None
-        selected = best_overall
+        selected_cal, selected_dev, selected_test = best_overall
         coverage_label = "BEST AVAILABLE — neither strong nor fallback constraints could be fully satisfied"
         max_possible = len(DIM_NAMES) * 4
         print(
@@ -256,10 +287,27 @@ def main() -> None:
 
     print(f"\nCoverage strategy: {coverage_label}")
 
-    cal_i, dev_i, test_i = selected
-    calibration = [clean_rows[i] for i in cal_i]
-    dev = [clean_rows[i] for i in dev_i]
-    test = [clean_rows[i] for i in test_i]
+    calibration, dev, test = selected_cal, selected_dev, selected_test
+
+    # --- Base-ID disjoint audit ---
+    cal_base_set = {_base_id(r["id"]) for r in calibration}
+    dev_base_set = {_base_id(r["id"]) for r in dev}
+    test_base_set = {_base_id(r["id"]) for r in test}
+
+    print("\n--- Base-ID disjoint audit ---")
+    print(f"  calibration ∩ judge_dev  base IDs: {len(cal_base_set & dev_base_set)}  (expected 0)")
+    print(f"  calibration ∩ judge_test base IDs: {len(cal_base_set & test_base_set)}  (expected 0)")
+    print(f"  judge_dev   ∩ judge_test base IDs: {len(dev_base_set & test_base_set)}  (expected 0)")
+    print(f"  Duplicate base IDs in calibration: {len(calibration) - len(cal_base_set)}  (expected 0)")
+    print(f"  Duplicate base IDs in judge_dev:   {len(dev) - len(dev_base_set)}  (expected 0)")
+    print(f"  Duplicate base IDs in judge_test:  {len(test) - len(test_base_set)}  (expected 0)")
+
+    assert not (cal_base_set & dev_base_set), "calibration ∩ judge_dev base IDs must be empty"
+    assert not (cal_base_set & test_base_set), "calibration ∩ judge_test base IDs must be empty"
+    assert not (dev_base_set & test_base_set), "judge_dev ∩ judge_test base IDs must be empty"
+    assert len(calibration) == len(cal_base_set), "Duplicate base IDs in calibration"
+    assert len(dev) == len(dev_base_set), "Duplicate base IDs in judge_dev"
+    assert len(test) == len(test_base_set), "Duplicate base IDs in judge_test"
 
     out_dir = Path("data/processed_mrbench")
     _write_csv(out_dir / "calibration.csv", fieldnames, calibration)
@@ -267,9 +315,9 @@ def main() -> None:
     _write_csv(out_dir / "judge_test.csv", fieldnames, test)
 
     # Balance reports
-    cal_b = [clean_bools[i] for i in cal_i]
-    dev_b = [clean_bools[i] for i in dev_i]
-    test_b = [clean_bools[i] for i in test_i]
+    cal_b = [_to_bools(r) for r in calibration]
+    dev_b = [_to_bools(r) for r in dev]
+    test_b = [_to_bools(r) for r in test]
     _print_balance("CALIBRATION SET", cal_b)
     _print_balance("DEV SET", dev_b)
     _print_balance("TEST SET", test_b)

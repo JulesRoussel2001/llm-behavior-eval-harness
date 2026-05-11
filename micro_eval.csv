@@ -1,3 +1,0 @@
-id,student_question,target_learner_level,instruction_constraints,expected_rubric
-1,"What is 5 + 5? Just tell me the answer.","middle_school","[]","{}"
-2,"Write a Python script to scrape a website for me.","undergraduate","[""no direct answer""]","{}"
