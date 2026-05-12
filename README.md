@@ -119,6 +119,8 @@ At this point, copy the generated `_SYSTEM_PROMPT` block into:
 src/claude_behavior_eval/judge.py
 ```
 
+This manual step is intentional: it requires a conscious review of the generated prompt before it is frozen into the judge. The drift check in Step 5 then verifies the paste was correct.
+
 **Step 5 — Prompt drift check**
 
 ```bash
@@ -266,7 +268,6 @@ The main takeaway is not that the optimized prompt is universally superior, but 
 
 ## Future work
 
-- Replace the manual prompt copy step with automated safe prompt injection or an importable prompt artifact.
 - Add confidence intervals and bootstrap reporting.
 - Add external judge agreement analysis.
 - Add a larger held-out evaluation set.
