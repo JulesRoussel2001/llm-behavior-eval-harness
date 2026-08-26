@@ -1,82 +1,63 @@
 """
-Class-aware split construction for MRBench judge validation.
+Conversation-level split construction for MRBench judge validation.
 
-Produces three disjoint CSV files from judge_validation_raw.csv:
-  calibration.csv  -  3 rows (prompt grounding examples, excluded from metrics)
-  judge_dev.csv    - 20 rows (primary evaluation set)
-  judge_test.csv   - 10 rows (held-out test set)
+Produces, from judge_validation_raw.csv:
+  calibration.csv           -   3 rows (prompt grounding examples, excluded from metrics)
+  judge_dev.csv             -  40 conversations, filtered rows
+  judge_test.csv            -  40 conversations, filtered rows
+  judge_split_manifest.json -  conversation ids + before/after/excluded row counts
 
-All three splits are disjoint both by row ID and by base conversation ID:
-  calibration base IDs ∩ judge_dev base IDs   = 0
-  calibration base IDs ∩ judge_test base IDs  = 0
-  judge_dev base IDs   ∩ judge_test base IDs  = 0
-  No duplicate base IDs within any single split.
+Behaviour:
+  * Calibration is FROZEN. The three calibration rows are pinned by item_id
+    (PINNED_CALIBRATION_IDS). calibration.csv is loaded from disk, its ids are
+    asserted against the pinned list, and it is written back byte-for-byte
+    unchanged. This is required because scripts/03_generate_prompt.py embeds these
+    exact rows into the frozen judge system prompt; any change would break
+    scripts/05_check_prompt_drift.py. The script never regenerates calibration.
 
-Eligibility filter (8 dimensions):
-  - 7 boolean dimensions: must have Yes/No (or True/False/1/0)
-  - tutor_tone: must be Encouraging or Neutral (Offensive excluded)
+  * The three calibration CONVERSATIONS (base ids) are excluded from everything else.
 
-MRBench Tutor_Tone is categorical rather than boolean. We preserve the pedagogical
-distinction between Neutral and Encouraging by reformulating tone as a binary
-Encouraging-vs-Neutral metric. The single/rare Offensive class is excluded from the
-quantitative split because it has insufficient support for reliable Macro-F1 evaluation.
-Therefore, tutor_tone passed=True means Encouraging, and passed=False means Neutral.
+  * From the remaining conversations, 80 are sampled with a fixed seed (SEED=42),
+    then split into judge_dev = 40 conversations and judge_test = 40 conversations.
 
-Split construction groups clean rows by base conversation ID (stripping the _ModelName
-suffix from each row ID). The sampling loop shuffles base conversation IDs rather than
-individual rows, then picks one representative row per base conversation from each pool.
-This guarantees no shared conversation context across splits.
+  * For each selected conversation, ALL of its rows are expanded (every tutor
+    model's response), then every row that the downstream metric parser would
+    reject is dropped. The reject rule is the EXACT check used by validate_judge
+    (validate_judge._parse_dim_label): a row is kept only if every human_<dim>
+    label parses — i.e. Offensive tutor_tone and empty/unknown labels are removed.
+    Importing that function guarantees the split filter and validate_judge can
+    never diverge; validate_judge stays fail-loud and never sees an unclean row.
 
-Two-tier coverage strategy:
-  STRONG (preferred, 25% minority threshold):
-    dev  >= 5 True  and >= 5 False  per dimension
-    test >= 2 True  and >= 2 False  per dimension
+  * Conversation counts stay at 40/40; splits are NOT enlarged to compensate for
+    filtered rows (the Actor pool needs its remaining ~115 conversations).
 
-  FALLBACK (minimum acceptable):
-    dev  >= 2 True  and >= 2 False  per dimension
-    test >= 1 True  and >= 1 False  per dimension
-
-The first split satisfying the STRONG constraint is used. If none is found in
-MAX_ATTEMPTS, the first split satisfying FALLBACK is used with a printed WARNING.
-If neither is found, the best-scored overall split is used with a WARNING.
+All three splits are disjoint by base conversation id.
 """
 
 import csv
+import json
 import random
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-CALIBRATION_SIZE = 3
-DEV_SIZE = 20
-TEST_SIZE = 10
-TOTAL_NEEDED = CALIBRATION_SIZE + DEV_SIZE + TEST_SIZE
-MAX_ATTEMPTS = 10_000
+# The metric parser is imported (not reimplemented) so the split filter and
+# validate_judge apply identical accept/reject logic and can never diverge.
+from claude_behavior_eval.validate_judge import _JUDGE_DIMENSIONS, _parse_dim_label
+
+# --- Frozen calibration (must match data/processed_mrbench/calibration.csv) ---
+# These three rows are embedded verbatim in the frozen judge prompt. Do not change.
+PINNED_CALIBRATION_IDS = [
+    "291616268_Gemini",
+    "413466564_GPT4",
+    "5780-2d7f22e8-1486-4555-9a5d-8d946507cb0a_Mistral",
+]
+
+# --- Conversation sampling ---
+SELECTED_CONVERSATIONS = 80
+DEV_CONVERSATIONS = 40
+TEST_CONVERSATIONS = 40
 SEED = 42
-
-BOOL_COLS = [
-    "human_mistake_identification",
-    "human_mistake_location",
-    "human_answer_revealing_appropriate",
-    "human_providing_guidance",
-    "human_actionability",
-    "human_coherence",
-    "human_human_likeness",
-]
-TONE_COL = "human_tutor_tone"
-
-DIM_NAMES = [
-    "mistake_identification",
-    "mistake_location",
-    "answer_revealing_appropriate",
-    "providing_guidance",
-    "actionability",
-    "coherence",
-    "human_likeness",
-    "tutor_tone",
-]
-
-_BOOL_VALID = {"yes", "no", "true", "false", "1", "0"}
 
 
 def _base_id(full_id: str) -> str:
@@ -84,64 +65,38 @@ def _base_id(full_id: str) -> str:
     return full_id.rsplit("_", 1)[0]
 
 
-def _is_clean(row: dict) -> tuple[bool, str]:
-    """Return (is_clean, exclusion_reason)."""
-    for col in BOOL_COLS:
-        if row[col].strip().lower() not in _BOOL_VALID:
-            return False, "missing_bool"
-    tone = row[TONE_COL].strip()
-    if tone == "Offensive":
-        return False, "offensive_tone"
-    if tone not in {"Encouraging", "Neutral"}:
-        return False, "missing_tone" if tone == "" else "invalid_tone"
-    return True, ""
+def rejection_reason(row: dict) -> str | None:
+    """Return None if the row is metric-parseable, else a reason string.
+
+    Uses validate_judge._parse_dim_label as the single source of truth for what
+    counts as an acceptable row, so this filter can never diverge from the metric
+    step. The reason label is derived only for reporting.
+    """
+    for dim in _JUDGE_DIMENSIONS:
+        value = row.get(f"human_{dim}", "")
+        try:
+            _parse_dim_label(dim, value)
+        except ValueError:
+            v = (value or "").strip()
+            if dim == "tutor_tone" and v == "Offensive":
+                return "offensive_tone"
+            if v == "":
+                return "missing_label"
+            return "invalid_label"
+    return None
 
 
-def _to_bools(row: dict) -> list[bool]:
-    """Convert a clean row to a list of 8 booleans (one per DIM_NAMES)."""
-    bools = [row[c].strip().lower() in {"yes", "true", "1"} for c in BOOL_COLS]
-    bools.append(row[TONE_COL].strip() == "Encouraging")
-    return bools
-
-
-def _coverage_ok(bool_rows: list[list[bool]], min_true: int, min_false: int) -> bool:
-    for d in range(len(DIM_NAMES)):
-        vals = [b[d] for b in bool_rows]
-        if sum(vals) < min_true or (len(vals) - sum(vals)) < min_false:
-            return False
-    return True
-
-
-def _coverage_score(bool_rows: list[list[bool]], min_true: int, min_false: int) -> int:
-    """Count (dim, class) pairs meeting minimum coverage. Max = len(DIM_NAMES) * 2."""
-    score = 0
-    for d in range(len(DIM_NAMES)):
-        vals = [b[d] for b in bool_rows]
-        if sum(vals) >= min_true:
-            score += 1
-        if (len(vals) - sum(vals)) >= min_false:
-            score += 1
-    return score
-
-
-def _print_balance(label: str, bool_rows: list[list[bool]]) -> None:
-    n = len(bool_rows)
-    print(f"\n{label} ({n} rows):")
-    print(f"  {'Dimension':<38} {'True':>6} {'False':>6}  {'Note'}")
-    print(f"  {'-'*65}")
-    for i, dim in enumerate(DIM_NAMES):
-        vals = [b[i] for b in bool_rows]
-        t = sum(vals)
-        f = n - t
-        minority = min(t, f)
-        minority_pct = minority / n if n else 0
-        if minority == 0:
-            note = "WEAK — single-class"
-        elif minority_pct >= 0.25:
-            note = f"GOOD ≥25%  ({minority_pct:.0%})"
+def filter_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Split rows into (kept, excluded_by_reason_counts) using the metric parser."""
+    kept: list[dict] = []
+    reasons: dict[str, int] = {"offensive_tone": 0, "missing_label": 0, "invalid_label": 0}
+    for row in rows:
+        reason = rejection_reason(row)
+        if reason is None:
+            kept.append(row)
         else:
-            note = f"OK min     ({minority_pct:.0%})"
-        print(f"  {dim:<38} {t:>6} {f:>6}  {note}")
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return kept, reasons
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
@@ -152,210 +107,139 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
     print(f"Wrote: {path}  ({len(rows)} rows)")
 
 
-def main() -> None:
-    rng = random.Random(SEED)
+def load_pinned_calibration(cal_path: Path) -> list[str]:
+    """Load calibration.csv, assert its ids match the pinned list, return the ids.
 
-    raw_path = Path("data/processed_mrbench/judge_validation_raw.csv")
+    Rewrites calibration.csv byte-for-byte unchanged so the pipeline still
+    'produces' it as an output without any risk of altering the frozen rows.
+    """
+    if not cal_path.exists():
+        sys.exit(
+            f"ERROR: {cal_path} not found. Calibration is frozen and must be present; "
+            "it is not regenerated by this script."
+        )
+    original_bytes = cal_path.read_bytes()
+    with cal_path.open(encoding="utf-8", newline="") as f:
+        cal_ids = [r["id"] for r in csv.DictReader(f)]
+    if cal_ids != PINNED_CALIBRATION_IDS:
+        sys.exit(
+            "ERROR: calibration.csv ids do not match the pinned calibration set.\n"
+            f"  expected: {PINNED_CALIBRATION_IDS}\n"
+            f"  found:    {cal_ids}"
+        )
+    cal_path.write_bytes(original_bytes)  # byte-identical passthrough
+    print(f"Calibration frozen: {len(cal_ids)} rows (byte-identical passthrough).")
+    return cal_ids
+
+
+def _print_split_filtering(label: str, n_conv: int, before: int, after: int, reasons: dict[str, int]) -> None:
+    print(f"\n{label}: {n_conv} conversations")
+    print(f"  rows before filtering: {before}")
+    print(f"  rows after filtering:  {after}")
+    print(f"  excluded rows:         {before - after}")
+    for reason, cnt in reasons.items():
+        print(f"    {reason:<16} {cnt}")
+
+
+def main() -> None:
+    out_dir = Path("data/processed_mrbench")
+    raw_path = out_dir / "judge_validation_raw.csv"
     if not raw_path.exists():
         sys.exit(f"ERROR: {raw_path} not found. Run prepare_mrbench first.")
 
-    with raw_path.open(encoding="utf-8") as f:
+    with raw_path.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
         all_rows = list(reader)
 
-    # Classify rows
-    excluded: dict[str, int] = {"missing_bool": 0, "missing_tone": 0,
-                                 "offensive_tone": 0, "invalid_tone": 0}
-    clean_rows: list[dict] = []
-    for row in all_rows:
-        ok, reason = _is_clean(row)
-        if ok:
-            clean_rows.append(row)
-        else:
-            excluded[reason] = excluded.get(reason, 0) + 1
-
-    print(f"Total raw rows:    {len(all_rows)}")
-    print(f"Clean eligible:    {len(clean_rows)}")
-    print(f"Excluded: {excluded}")
-
-    if len(clean_rows) < TOTAL_NEEDED:
-        sys.exit(
-            f"ERROR: Need {TOTAL_NEEDED} rows but only {len(clean_rows)} clean rows available."
-        )
-
-    # Group clean rows by base conversation ID (strips _ModelName suffix)
+    # Group rows by base conversation id, preserving row order.
     groups: dict[str, list[dict]] = defaultdict(list)
-    for row in clean_rows:
+    for row in all_rows:
         groups[_base_id(row["id"])].append(row)
-    base_ids = sorted(groups.keys())
 
-    print(f"Distinct base conversation IDs in clean pool: {len(base_ids)}")
+    print(f"Total raw rows:                {len(all_rows)}")
+    print(f"Distinct base conversations:   {len(groups)}")
 
-    if len(base_ids) < TOTAL_NEEDED:
+    # --- Frozen calibration ---
+    cal_ids = load_pinned_calibration(out_dir / "calibration.csv")
+    cal_bases = {_base_id(i) for i in cal_ids}
+    for b in cal_bases:
+        if b not in groups:
+            sys.exit(f"ERROR: calibration conversation {b!r} not present in raw data.")
+
+    # --- Remaining conversations, sampled deterministically ---
+    remaining = sorted(b for b in groups if b not in cal_bases)
+    print(f"Conversations available (minus calibration): {len(remaining)}")
+    if len(remaining) < SELECTED_CONVERSATIONS:
         sys.exit(
-            f"ERROR: Need {TOTAL_NEEDED} distinct base conversation IDs but only "
-            f"{len(base_ids)} available."
+            f"ERROR: need {SELECTED_CONVERSATIONS} conversations but only "
+            f"{len(remaining)} available after excluding calibration."
         )
 
-    # Report pool class balance; warn about impossible constraints
-    all_clean_bools = [_to_bools(r) for r in clean_rows]
-    print("\nClass balance in clean pool (row level):")
-    print(f"  {'Dimension':<38} {'True':>6} {'False':>6}")
-    print(f"  {'-'*52}")
-    impossible_strong: list[str] = []
-    impossible_fallback: list[str] = []
-    for i, dim in enumerate(DIM_NAMES):
-        t = sum(b[i] for b in all_clean_bools)
-        f = len(all_clean_bools) - t
-        print(f"  {dim:<38} {t:>6} {f:>6}")
-        if t < 5 or f < 5:
-            impossible_strong.append(dim)
-        if t < 2 or f < 2:
-            impossible_fallback.append(dim)
-    if impossible_strong:
-        print(f"  NOTE: Strong (≥5) constraint unreachable for: {', '.join(impossible_strong)}")
-    if impossible_fallback:
-        print(f"  WARNING: Fallback (≥2) constraint unreachable for: {', '.join(impossible_fallback)}")
+    rng = random.Random(SEED)
+    shuffled = remaining.copy()
+    rng.shuffle(shuffled)
+    selected = shuffled[:SELECTED_CONVERSATIONS]
+    dev_bases = selected[:DEV_CONVERSATIONS]
+    test_bases = selected[DEV_CONVERSATIONS:DEV_CONVERSATIONS + TEST_CONVERSATIONS]
 
-    # --- Repeated random sampling (base-conversation-level) ---
-    # Each attempt:
-    #   1. Shuffle base_ids
-    #   2. First CALIBRATION_SIZE → calibration pool; next DEV_SIZE → dev pool; next TEST_SIZE → test pool
-    #   3. Pick one representative row per base_id from each pool via rng.choice
-    #   4. Check STRONG then FALLBACK coverage on dev and test
-    best_strong: tuple | None = None
-    best_fallback: tuple | None = None
-    best_overall: tuple | None = None
-    best_overall_score = -1
+    # Expand ALL rows of every selected conversation, then filter to parseable rows.
+    dev_all = [r for b in dev_bases for r in groups[b]]
+    test_all = [r for b in test_bases for r in groups[b]]
+    dev_rows, dev_reasons = filter_rows(dev_all)
+    test_rows, test_reasons = filter_rows(test_all)
 
-    for attempt in range(MAX_ATTEMPTS):
-        shuffled_bases = base_ids.copy()
-        rng.shuffle(shuffled_bases)
+    # --- Disjointness audit (by conversation id) ---
+    dev_set, test_set = set(dev_bases), set(test_bases)
+    assert cal_bases.isdisjoint(dev_set), "calibration ∩ judge_dev conversations must be empty"
+    assert cal_bases.isdisjoint(test_set), "calibration ∩ judge_test conversations must be empty"
+    assert dev_set.isdisjoint(test_set), "judge_dev ∩ judge_test conversations must be empty"
+    assert len(dev_bases) == DEV_CONVERSATIONS
+    assert len(test_bases) == TEST_CONVERSATIONS
 
-        cal_bases = shuffled_bases[:CALIBRATION_SIZE]
-        dev_bases = shuffled_bases[CALIBRATION_SIZE:CALIBRATION_SIZE + DEV_SIZE]
-        test_bases = shuffled_bases[CALIBRATION_SIZE + DEV_SIZE:CALIBRATION_SIZE + DEV_SIZE + TEST_SIZE]
+    print("\n--- Conversation disjoint audit ---")
+    print(f"  calibration ∩ judge_dev : {len(cal_bases & dev_set)}  (expected 0)")
+    print(f"  calibration ∩ judge_test: {len(cal_bases & test_set)}  (expected 0)")
+    print(f"  judge_dev   ∩ judge_test: {len(dev_set & test_set)}  (expected 0)")
 
-        calibration = [rng.choice(groups[b]) for b in cal_bases]
-        dev = [rng.choice(groups[b]) for b in dev_bases]
-        test = [rng.choice(groups[b]) for b in test_bases]
+    # --- Write splits ---
+    _write_csv(out_dir / "judge_dev.csv", fieldnames, dev_rows)
+    _write_csv(out_dir / "judge_test.csv", fieldnames, test_rows)
 
-        dev_b = [_to_bools(r) for r in dev]
-        test_b = [_to_bools(r) for r in test]
+    # --- Manifest ---
+    manifest = {
+        "seed": SEED,
+        "calibration": {
+            "conversation_ids": sorted(cal_bases),
+            "num_conversations": len(cal_bases),
+            "num_rows": len(cal_ids),
+        },
+        "judge_dev": {
+            "conversation_ids": dev_bases,
+            "num_conversations": len(dev_bases),
+            "rows_before_filtering": len(dev_all),
+            "rows_after_filtering": len(dev_rows),
+            "excluded_rows": len(dev_all) - len(dev_rows),
+            "excluded_by_reason": dev_reasons,
+        },
+        "judge_test": {
+            "conversation_ids": test_bases,
+            "num_conversations": len(test_bases),
+            "rows_before_filtering": len(test_all),
+            "rows_after_filtering": len(test_rows),
+            "excluded_rows": len(test_all) - len(test_rows),
+            "excluded_by_reason": test_reasons,
+        },
+    }
+    manifest_path = out_dir / "judge_split_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote: {manifest_path}")
 
-        strong_ok = _coverage_ok(dev_b, 5, 5) and _coverage_ok(test_b, 2, 2)
-        fallback_ok = _coverage_ok(dev_b, 2, 2) and _coverage_ok(test_b, 1, 1)
-
-        if strong_ok:
-            best_strong = (calibration, dev, test)
-            print(f"\nStrong 25% dev coverage satisfied (attempt {attempt + 1}).")
-            break
-
-        if fallback_ok and best_fallback is None:
-            best_fallback = (calibration, dev, test)
-
-        score = _coverage_score(dev_b, 5, 5) + _coverage_score(test_b, 2, 2)
-        if score > best_overall_score:
-            best_overall_score = score
-            best_overall = (calibration, dev, test)
-
-    # Choose which split to use
-    if best_strong is not None:
-        selected_cal, selected_dev, selected_test = best_strong
-        coverage_label = "STRONG — 25% minority threshold met for all feasible dimensions"
-    elif best_fallback is not None:
-        selected_cal, selected_dev, selected_test = best_fallback
-        coverage_label = "FALLBACK MINIMUM — 25% threshold not achieved; minimum 2T+2F dev / 1T+1F test used"
-        print(
-            "\nWARNING: Strong 25% dev coverage not fully achieved. "
-            "Using fallback minimum coverage split."
-        )
-        if impossible_strong:
-            print(f"  Dimensions blocking strong coverage: {', '.join(impossible_strong)}")
-    else:
-        assert best_overall is not None
-        selected_cal, selected_dev, selected_test = best_overall
-        coverage_label = "BEST AVAILABLE — neither strong nor fallback constraints could be fully satisfied"
-        max_possible = len(DIM_NAMES) * 4
-        print(
-            f"\nWARNING: No satisfying split found after {MAX_ATTEMPTS} attempts. "
-            f"Using best available split (score {best_overall_score}/{max_possible})."
-        )
-        if impossible_fallback:
-            print(f"  Impossible fallback dimensions: {', '.join(impossible_fallback)}")
-
-    print(f"\nCoverage strategy: {coverage_label}")
-
-    calibration, dev, test = selected_cal, selected_dev, selected_test
-
-    # --- Base-ID disjoint audit ---
-    cal_base_set = {_base_id(r["id"]) for r in calibration}
-    dev_base_set = {_base_id(r["id"]) for r in dev}
-    test_base_set = {_base_id(r["id"]) for r in test}
-
-    print("\n--- Base-ID disjoint audit ---")
-    print(f"  calibration ∩ judge_dev  base IDs: {len(cal_base_set & dev_base_set)}  (expected 0)")
-    print(f"  calibration ∩ judge_test base IDs: {len(cal_base_set & test_base_set)}  (expected 0)")
-    print(f"  judge_dev   ∩ judge_test base IDs: {len(dev_base_set & test_base_set)}  (expected 0)")
-    print(f"  Duplicate base IDs in calibration: {len(calibration) - len(cal_base_set)}  (expected 0)")
-    print(f"  Duplicate base IDs in judge_dev:   {len(dev) - len(dev_base_set)}  (expected 0)")
-    print(f"  Duplicate base IDs in judge_test:  {len(test) - len(test_base_set)}  (expected 0)")
-
-    assert not (cal_base_set & dev_base_set), "calibration ∩ judge_dev base IDs must be empty"
-    assert not (cal_base_set & test_base_set), "calibration ∩ judge_test base IDs must be empty"
-    assert not (dev_base_set & test_base_set), "judge_dev ∩ judge_test base IDs must be empty"
-    assert len(calibration) == len(cal_base_set), "Duplicate base IDs in calibration"
-    assert len(dev) == len(dev_base_set), "Duplicate base IDs in judge_dev"
-    assert len(test) == len(test_base_set), "Duplicate base IDs in judge_test"
-
-    out_dir = Path("data/processed_mrbench")
-    _write_csv(out_dir / "calibration.csv", fieldnames, calibration)
-    _write_csv(out_dir / "judge_dev.csv", fieldnames, dev)
-    _write_csv(out_dir / "judge_test.csv", fieldnames, test)
-
-    # Balance reports
-    cal_b = [_to_bools(r) for r in calibration]
-    dev_b = [_to_bools(r) for r in dev]
-    test_b = [_to_bools(r) for r in test]
-    _print_balance("CALIBRATION SET", cal_b)
-    _print_balance("DEV SET", dev_b)
-    _print_balance("TEST SET", test_b)
-
-    # Per-constraint audit
-    print("\nConstraint audit:")
-    any_issue = False
-    for i, dim in enumerate(DIM_NAMES):
-        dev_t = sum(b[i] for b in dev_b)
-        dev_f = len(dev_b) - dev_t
-        test_t = sum(b[i] for b in test_b)
-        test_f = len(test_b) - test_t
-        issues = []
-        if dev_t < 5 or dev_f < 5:
-            strong_miss = []
-            if dev_t < 5: strong_miss.append(f"dev True={dev_t}<5")
-            if dev_f < 5: strong_miss.append(f"dev False={dev_f}<5")
-            issues.append("strong: " + ", ".join(strong_miss))
-        if dev_t < 2 or dev_f < 2:
-            if dev_t < 2: issues.append(f"FALLBACK FAIL dev True={dev_t}<2")
-            if dev_f < 2: issues.append(f"FALLBACK FAIL dev False={dev_f}<2")
-        if test_t < 2 or test_f < 2:
-            strong_miss = []
-            if test_t < 2: strong_miss.append(f"test True={test_t}<2")
-            if test_f < 2: strong_miss.append(f"test False={test_f}<2")
-            issues.append("strong test: " + ", ".join(strong_miss))
-        if test_t < 1 or test_f < 1:
-            if test_t < 1: issues.append(f"FALLBACK FAIL test True={test_t}<1")
-            if test_f < 1: issues.append(f"FALLBACK FAIL test False={test_f}<1")
-
-        if issues:
-            any_issue = True
-            print(f"  NOTE  {dim}: {'; '.join(issues)}")
-        else:
-            print(f"  OK    {dim}")
-
-    if not any_issue:
-        print("\nAll dimensions satisfy the strong 25% threshold in dev and test sets.")
+    # --- Summary ---
+    print("\n=== Split summary ===")
+    print(f"  calibration: {len(cal_bases):>3} conversations, {len(cal_ids):>4} rows")
+    _print_split_filtering("  judge_dev", len(dev_bases), len(dev_all), len(dev_rows), dev_reasons)
+    _print_split_filtering("  judge_test", len(test_bases), len(test_all), len(test_rows), test_reasons)
 
 
 if __name__ == "__main__":
