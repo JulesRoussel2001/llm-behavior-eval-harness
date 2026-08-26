@@ -1,9 +1,11 @@
-# Reproducing the Mini Pipeline
+# Reproducing the Pipeline
 
 This document contains the exact commands to reproduce all data, splits, and
 evaluations from scratch. Run them in order from the repository root.
 
-Prerequisite: activate the virtual environment and set `ANTHROPIC_API_KEY` in `.env`.
+Prerequisite: activate the virtual environment, `pip install -r requirements.txt`
+(includes `scipy`, needed by `scripts/06_stats.py`), and set `ANTHROPIC_API_KEY`
+in `.env`.
 
 ---
 
@@ -19,38 +21,41 @@ There are three distinct data levels:
 
 ### Judge validation data (historical tutor responses + human labels)
 
-- `calibration.csv` — 3 rows, embedded in the Judge prompt as grounding examples
-- `judge_dev.csv` — 20 rows, primary validation set (Macro F1 against human labels)
-- `judge_test.csv` — 10 rows, locked held-out set (run once only)
+- `calibration.csv` — 3 rows, embedded in the Judge prompt as grounding examples.
+  **Frozen**: pinned by `item_id` and written back byte-for-byte by
+  `scripts/01_create_splits.py`. It must never change, because the frozen judge
+  prompt in `judge.py` embeds these exact rows.
+- `judge_dev.csv` — 40 conversations, primary validation set (Macro F1 vs human labels)
+- `judge_test.csv` — 40 conversations, locked held-out set (run once only)
+- `judge_split_manifest.json` — provenance: conversation ids per split plus
+  per-split `rows_before_filtering` / `rows_after_filtering` / `excluded_by_reason`.
 
 These contain `tutor_response` and `human_*` label columns. They must not be
 fed to the Actor pipeline.
 
-All three Judge splits are disjoint by **base conversation ID** (not just by row
-ID). A row ID has the form `<conv_id>_<ModelName>`; stripping the model suffix
-gives the base conversation ID. No two splits share a base conversation, and no
-split contains two rows from the same conversation. This prevents the Judge from
-seeing different model responses to the same student question during validation.
+Judge splits are sampled at the **conversation level**: 80 conversations are drawn
+(seed 42) and split 40/40. For each selected conversation **all** of its rows
+(every tutor model's response) are expanded, then rows the metric parser would
+reject are dropped — the filter imports `validate_judge._parse_dim_label`, so the
+split filter and the metric step can never diverge and `validate_judge` stays
+fail-loud (it never sees an unclean row). Rows with `Offensive` tutor_tone or
+empty/unknown labels are removed. This typically leaves ~198 rows per split
+(~330 before filtering). The three Judge splits — calibration, judge_dev,
+judge_test — are disjoint by base conversation ID, so the Judge never sees two
+splits sharing the same student conversation.
 
-### Actor full data (question-only, no human labels)
+### Actor data (question-only, no human labels)
 
-- `actor_train.csv` — 80 rows, Actor prompt optimisation input
-- `actor_test.csv` — 20 rows, locked held-out Actor evaluation set
+- `actor_train.csv` — up to 55 conversations, Actor prompt optimisation input
+- `actor_test.csv` — 60 conversations, locked held-out Actor evaluation set
 
 Actor files contain only: `id`, `student_question`, `target_learner_level`,
 `instruction_constraints`, `expected_rubric`.
 
-Base conversation IDs from all three Judge validation splits (calibration,
-judge_dev, judge_test) are excluded from Actor files (leakage guard). Actor
-splits are stratified by question length (short / medium / long) to avoid
-input-distribution skew.
-
-### Actor mini data (fast-prototype subsets)
-
-- `actor_mini_train.csv` — 30 rows sampled from `actor_train.csv`
-- `actor_mini_test.csv` — 20 rows = `actor_test.csv` (test is already mini-sized)
-
-These replace the old `mini_dev.csv` / `mini_test.csv` (which had unclear provenance).
+Every conversation used by a Judge split (calibration + judge_dev + judge_test,
+read from `judge_split_manifest.json`) is excluded from the Actor pool (leakage
+guard). With 83 conversations excluded, ~112 remain: 60 go to `actor_test`, and
+the remainder (capped at 55) go to `actor_train`.
 
 ---
 
@@ -73,7 +78,8 @@ PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.prepare_mrbench \
 ## B. Verify labels
 
 Prints class distributions and confirms `answer_revealing_appropriate` has
-both Yes and No values (catches normalisation regressions).
+both Yes and No values (catches normalisation regressions). Actual per-split
+filtered counts live in `judge_split_manifest.json` (written in step C).
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/02_verify_labels.py
@@ -83,16 +89,14 @@ PYTHONPATH=src .venv/bin/python scripts/02_verify_labels.py
 
 ## C. Create Judge validation splits
 
-Reads `judge_validation_raw.csv`, filters to eligible rows (7 boolean dimensions
-clean + tutor_tone Encouraging or Neutral), groups rows by base conversation ID,
-and writes three splits that are disjoint by both row ID and base conversation ID:
-- `data/processed_mrbench/calibration.csv` — 3 rows (prompt grounding examples)
-- `data/processed_mrbench/judge_dev.csv` — 20 rows (primary evaluation set)
-- `data/processed_mrbench/judge_test.csv` — 10 rows (held-out; run once only)
-
-Each split contains exactly one row per base conversation. The algorithm shuffles
-base conversation IDs (not individual rows) and picks one representative row per
-base conversation, so no two splits share the same conversation context.
+Reads `judge_validation_raw.csv`, keeps `calibration.csv` frozen (pinned ids,
+byte-identical passthrough), samples 80 non-calibration conversations (seed 42),
+splits them 40/40, expands each to all its rows, and drops rows the metric parser
+rejects. Writes:
+- `data/processed_mrbench/calibration.csv` — 3 rows (unchanged; frozen grounding examples)
+- `data/processed_mrbench/judge_dev.csv` — 40 conversations (~198 rows after filtering)
+- `data/processed_mrbench/judge_test.csv` — 40 conversations (~198 rows; run once only)
+- `data/processed_mrbench/judge_split_manifest.json`
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/01_create_splits.py
@@ -100,7 +104,7 @@ PYTHONPATH=src .venv/bin/python scripts/01_create_splits.py
 
 ---
 
-## D. Generate Judge prompt
+## D. Generate Judge prompt  (MANUAL paste — normally a no-op)
 
 Reads `calibration.csv` and prints the `_SYSTEM_PROMPT` string to stdout.
 **Copy the output and paste it into `src/claude_behavior_eval/judge.py`**
@@ -110,44 +114,53 @@ to replace the existing `_SYSTEM_PROMPT` assignment.
 PYTHONPATH=src .venv/bin/python scripts/03_generate_prompt.py
 ```
 
-The prompt must be updated whenever `calibration.csv` changes (i.e., after
-re-running step C). The current `judge.py` already reflects the output of this
-script for the current `calibration.csv` — only re-run if you regenerate splits.
+Because `calibration.csv` is frozen, the generated prompt is identical to what
+is already in `judge.py`. You only ever need to re-paste if `calibration.csv`
+changes — which it does not. In normal operation this step is a no-op; step E
+verifies that.
 
 ---
 
-## E. Create Actor splits
+## E. Check prompt drift  (gate)
 
-Reads `dev.csv` and `test.csv`, excludes base conversation IDs used in Judge
-validation splits (leakage guard), selects the best-stratified split via
-repeated random sampling, and writes all four Actor files.
+Confirms `judge.py`'s `_SYSTEM_PROMPT` matches what `03_generate_prompt.py` would
+produce from the current `calibration.csv`. Must print PASS before any API step.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/05_check_prompt_drift.py
+```
+
+---
+
+## F. Create Actor splits
+
+Reads `dev.csv` and `test.csv`, excludes every conversation in
+`judge_split_manifest.json` (leakage guard), then shuffles (seed 42) and slices.
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/04_create_actor_splits.py
 ```
 
 Output:
-- `data/processed_mrbench/actor_train.csv` — 80 rows
-- `data/processed_mrbench/actor_test.csv` — 20 rows (held-out)
-- `data/processed_mrbench/actor_mini_train.csv` — 30 rows (subset of actor_train)
-- `data/processed_mrbench/actor_mini_test.csv` — 20 rows (= actor_test)
+- `data/processed_mrbench/actor_test.csv` — 60 conversations (held-out)
+- `data/processed_mrbench/actor_train.csv` — remaining eligible, capped at 55
 
 ---
 
-## F. Run tests
+## G. Run tests
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest --tb=short -q
 ```
 
-All 351 tests should pass before running any API-backed steps.
+All 301 tests should pass before running any API-backed steps.
 
 ---
 
-## G. Judge validation on dev set (API call)
+## H. Judge validation on dev set (API call)
 
-Runs the Judge against each row in `judge_dev.csv` (20 rows × 1 API call each)
-and writes per-row JSONL results and a Markdown report.
+Runs the Judge against each row in `judge_dev.csv` (one API call per row) and
+writes per-row JSONL results and a Markdown report.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
@@ -158,7 +171,7 @@ PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
 
 ---
 
-## H. Judge validation on test set (API call — run once only)
+## I. Judge validation on test set (API call — run once only)
 
 Run this only after finalising the Judge prompt. The test set is held out;
 running it multiple times inflates observed performance.
@@ -172,33 +185,26 @@ PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
 
 ---
 
-## I. Actor-Critic mini optimisation (API call)
+## J. Actor-Critic optimisation (API call)
 
-Runs `N` iterations of Actor generation + Judge scoring + prompt improvement.
-Uses `actor_mini_train.csv` (30 rows) for fast prototyping.
+Runs `N` iterations of Actor generation + Judge scoring + prompt improvement over
+`actor_train.csv`. Writes `iteration_<i>_results.jsonl`, `iteration_<i>_prompt.txt`,
+and a final `optimized_prompt.txt` (the improvement generated after the last
+evaluated iteration; it is itself not scored).
 
 ```bash
 PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/optimize.py \
-  --input-csv data/processed_mrbench/actor_mini_train.csv \
+  --input-csv data/processed_mrbench/actor_train.csv \
   --iterations 3 \
   --output-dir optimization_runs
 ```
 
-To resume from a previously optimised prompt:
-
-```bash
-PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/optimize.py \
-  --input-csv data/processed_mrbench/actor_mini_train.csv \
-  --iterations 3 \
-  --output-dir optimization_runs \
-  --initial-prompt-file optimization_runs/optimized_prompt.txt
-```
-
-For full-scale optimisation, replace `actor_mini_train.csv` with `actor_train.csv`.
+To resume from a previously optimised prompt, add
+`--initial-prompt-file optimization_runs/optimized_prompt.txt`.
 
 ---
 
-## J. Final Actor evaluation on held-out test set (API call)
+## K. Final Actor evaluation on held-out test set (API call)
 
 Score the optimised prompt on the locked test set (never used during optimisation).
 
@@ -206,7 +212,7 @@ Score the optimised prompt on the locked test set (never used during optimisatio
 
 ```bash
 PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
-  data/processed_mrbench/actor_mini_test.csv \
+  data/processed_mrbench/actor_test.csv \
   actor_test_baseline.jsonl
 ```
 
@@ -214,7 +220,7 @@ PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
 
 ```bash
 PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
-  data/processed_mrbench/actor_mini_test.csv \
+  data/processed_mrbench/actor_test.csv \
   actor_test_optimized.jsonl \
   --actor-system-prompt-file optimization_runs/optimized_prompt.txt
 ```
@@ -228,7 +234,22 @@ PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/report.py \
   --output-md final_results.md
 ```
 
-For held-out Actor evaluation replace `actor_mini_test.csv` with `actor_test.csv`.
+---
+
+## L. Paper statistics (local, no API)
+
+Computes per-dimension Judge reliability (accuracy, precision/recall/F1, Cohen's
+kappa, Clopper-Pearson CIs) and Actor pass-rate comparisons (with McNemar tests)
+from the JSONL outputs above. Requires `scipy`.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/06_stats.py \
+  --judge-dev judge_dev_results.jsonl \
+  --judge-test judge_test_results.jsonl \
+  --baseline actor_test_baseline.jsonl \
+  --optimized actor_test_optimized.jsonl \
+  --output-md stats_report.md
+```
 
 ---
 
@@ -239,13 +260,12 @@ For held-out Actor evaluation replace `actor_mini_test.csv` with `actor_test.csv
 | `data/processed_mrbench/dev.csv` | 136 | Conversation source pool (intermediate) | No | No |
 | `data/processed_mrbench/test.csv` | 59 | Conversation source pool (intermediate) | No | No |
 | `data/processed_mrbench/judge_validation_raw.csv` | 1 610 | Judge split source | Yes | Yes |
-| `data/processed_mrbench/calibration.csv` | 3 | Judge prompt grounding | Yes | Yes |
-| `data/processed_mrbench/judge_dev.csv` | 20 | Judge validation (primary) | Yes | Yes |
-| `data/processed_mrbench/judge_test.csv` | 10 | Judge validation (held-out) | Yes | Yes |
-| `data/processed_mrbench/actor_train.csv` | 80 | Actor optimisation input | No | No |
-| `data/processed_mrbench/actor_test.csv` | 20 | Actor evaluation (held-out) | No | No |
-| `data/processed_mrbench/actor_mini_train.csv` | 30 | Actor mini optimisation (fast) | No | No |
-| `data/processed_mrbench/actor_mini_test.csv` | 20 | Actor mini evaluation (= actor_test) | No | No |
+| `data/processed_mrbench/calibration.csv` | 3 | Judge prompt grounding (frozen) | Yes | Yes |
+| `data/processed_mrbench/judge_dev.csv` | 40 convs (~198 rows) | Judge validation (primary) | Yes | Yes |
+| `data/processed_mrbench/judge_test.csv` | 40 convs (~198 rows) | Judge validation (held-out) | Yes | Yes |
+| `data/processed_mrbench/judge_split_manifest.json` | — | Split provenance + filter counts | — | — |
+| `data/processed_mrbench/actor_train.csv` | ≤55 convs | Actor optimisation input | No | No |
+| `data/processed_mrbench/actor_test.csv` | 60 convs | Actor evaluation (held-out) | No | No |
 
 All files under `data/` are git-ignored (regenerated from raw data).
 `optimization_runs/` outputs are also git-ignored.
