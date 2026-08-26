@@ -151,11 +151,11 @@ def main() -> None:
         print(f"    {reason:<25} {cnt:>6}")
     print(f"  Total excluded: {len(rows) - clean_count}")
 
-    print(f"\n  Minimum needed for splits (3+20+10): 33")
-    if clean_count >= 33:
-        print(f"  STATUS: OK — {clean_count} clean rows available")
-    else:
-        print(f"  STATUS: INSUFFICIENT — need 33, have {clean_count}")
+    # Note: judge splits are now sampled at the conversation level (80 conversations
+    # split 40/40) with per-row filtering applied inside 01_create_splits.py, so
+    # there is no fixed clean-row minimum here. See judge_split_manifest.json for the
+    # actual before/after/excluded row counts per split.
+    print(f"\n  Clean rows available for conversation-level splits: {clean_count}")
 
     # --- Class balance for answer_revealing_appropriate specifically ---
     ara_yes = sum(1 for r in rows if r["human_answer_revealing_appropriate"] == "Yes")
