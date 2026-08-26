@@ -39,6 +39,7 @@ _SYSTEM_PROMPT = (
     "Do not provide chain-of-thought. Do not explain your reasoning step by step. "
     "Only provide short observable diagnostic reasons inside the structured tool output."
 )
+
 class ClaudeRubricJudge:
     def __init__(
         self,
