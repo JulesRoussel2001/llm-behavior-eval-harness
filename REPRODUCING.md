@@ -143,6 +143,27 @@ PYTHONPATH=src .venv/bin/python scripts/07_disagreements.py \
   --input judge_dev_results_v1.jsonl --output disagreements_dev_v1.md
 ```
 
+### D2b. (Optional) Propose the next candidate with the model — one API call
+
+Given the current version, DEV stats, and the disagreement report, ask the model to
+draft the next candidate. It preserves the opening framing, the
+`{{CALIBRATION_EXAMPLES}}` marker, and the output/tool instructions byte-for-byte
+(rejected to `<out>.REJECTED` otherwise), and writes a rationale. It never reads
+`FROZEN`, `calibration.csv`, or any `judge_test_*` file, and never writes `judge.py`.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/09_propose_judge_version.py \
+  --current judge_prompts/v1.txt \
+  --stats stats_dev_v1.md \
+  --disagreements disagreements_dev_v1.md \
+  --out judge_prompts/v2.candidate.txt \
+  --rationale judge_prompts/v2.rationale.md \
+  --model <model-id>
+```
+
+Review the candidate + rationale, rename to `judge_prompts/v2.txt`, and re-enter at
+D1 to score it on DEV.
+
 ### D3. Decide, freeze, and paste
 
 When a candidate wins on DEV, record it in `judge_prompts/LOG.md`, write its name
