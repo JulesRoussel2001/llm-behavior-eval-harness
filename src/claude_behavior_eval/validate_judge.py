@@ -5,7 +5,8 @@ import csv
 import json
 from pathlib import Path
 
-from claude_behavior_eval.judge import ClaudeRubricJudge
+from claude_behavior_eval.judge import ClaudeRubricJudge, _SYSTEM_PROMPT
+from claude_behavior_eval.judge_prompt import assemble_prompt, prompt_sha256
 from claude_behavior_eval.schemas import DatasetItem, MRBenchEvaluation
 
 _JUDGE_DIMENSIONS = list(MRBenchEvaluation.model_fields.keys())
@@ -82,9 +83,24 @@ def validate_judge(
     output_jsonl: Path,
     report_md: Path,
     judge: ClaudeRubricJudge | None = None,
+    judge_prompt_version: str | None = None,
 ) -> dict[str, object]:
+    # Resolve the prompt actually used, its version label, and its SHA-256.
+    # With a version: assemble judge_prompts/<version>.txt (regardless of FROZEN)
+    #   and use it, so DEV runs of candidate versions need not edit judge.py.
+    # Without a version: behaviour is unchanged — the frozen judge.py prompt.
+    if judge_prompt_version is not None:
+        prompt_text = assemble_prompt(judge_prompt_version)
+    else:
+        prompt_text = _SYSTEM_PROMPT
+    judge_prompt_sha256 = prompt_sha256(prompt_text)
+
     if judge is None:
-        judge = ClaudeRubricJudge()
+        judge = (
+            ClaudeRubricJudge(system_prompt=prompt_text)
+            if judge_prompt_version is not None
+            else ClaudeRubricJudge()
+        )
 
     jsonl_rows: list[dict] = []
     dim_data: dict[str, list[_DimEntry]] = {dim: [] for dim in _JUDGE_DIMENSIONS}
@@ -131,6 +147,8 @@ def validate_judge(
 
             jsonl_rows.append({
                 "item_id": item_id,
+                "judge_prompt_version": judge_prompt_version,
+                "judge_prompt_sha256": judge_prompt_sha256,
                 "human_labels": human_labels,
                 "judge_labels": judge_labels,
                 "judge_reasons": judge_reasons,
@@ -158,6 +176,8 @@ def validate_judge(
         "macro_f1": macro_f1,
         "macro_accuracy": macro_accuracy,
         "per_dimension": per_dimension,
+        "judge_prompt_version": judge_prompt_version,
+        "judge_prompt_sha256": judge_prompt_sha256,
     }
 
     _write_report(report_md, metrics, dim_data)
@@ -184,10 +204,14 @@ def _write_report(
     macro_f1: float = metrics["macro_f1"]  # type: ignore[assignment]
     macro_accuracy: float = metrics["macro_accuracy"]  # type: ignore[assignment]
     per_dimension: dict[str, dict[str, float]] = metrics["per_dimension"]  # type: ignore[assignment]
+    version = metrics.get("judge_prompt_version")
+    sha = metrics.get("judge_prompt_sha256")
 
     lines: list[str] = [
         "# Judge Validation Report",
         "",
+        f"**Judge prompt version:** {version if version is not None else 'judge.py (frozen)'}  ",
+        f"**Judge prompt SHA-256:** {sha}  ",
         f"**Macro F1:** {macro_f1:.1f}%  ",
         f"**Macro Accuracy:** {macro_accuracy:.1f}%",
         "",
@@ -251,6 +275,15 @@ def main() -> None:
         "--report-md", default="judge_validation_report.md",
         help="Path to write the Markdown report.",
     )
+    parser.add_argument(
+        "--judge-prompt-version", default=None,
+        help=(
+            "Assemble the judge prompt from judge_prompts/<version>.txt + calibration "
+            "examples and use it instead of judge.py's _SYSTEM_PROMPT. Convention: name "
+            "candidate outputs judge_dev_results_<version>.jsonl / "
+            "judge_dev_report_<version>.md. Omit to use the frozen judge.py prompt."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -258,6 +291,7 @@ def main() -> None:
         input_csv=Path(args.input_csv),
         output_jsonl=Path(args.output_jsonl),
         report_md=Path(args.report_md),
+        judge_prompt_version=args.judge_prompt_version,
     )
 
 

@@ -45,9 +45,14 @@ class ClaudeRubricJudge:
         self,
         client: Anthropic | None = None,
         model: str = DEFAULT_JUDGE_MODEL,
+        system_prompt: str | None = None,
     ) -> None:
         self._client = client if client is not None else Anthropic()
         self._model = model
+        # Defaults to the frozen module-level _SYSTEM_PROMPT. A caller (e.g.
+        # validate_judge --judge-prompt-version) may inject a candidate prompt
+        # assembled from judge_prompts/<version>.txt without editing this file.
+        self._system_prompt = system_prompt if system_prompt is not None else _SYSTEM_PROMPT
 
     def evaluate_response(
         self,
@@ -67,7 +72,7 @@ class ClaudeRubricJudge:
             model=self._model,
             max_tokens=512,
             temperature=0.0,
-            system=_SYSTEM_PROMPT,
+            system=self._system_prompt,
             messages=[{"role": "user", "content": user_message}],
             tools=[
                 {
