@@ -104,31 +104,72 @@ PYTHONPATH=src .venv/bin/python scripts/01_create_splits.py
 
 ---
 
-## D. Generate Judge prompt  (MANUAL paste — normally a no-op)
+## D. Judge prompt as a versioned artifact
 
-Reads `calibration.csv` and prints the `_SYSTEM_PROMPT` string to stdout.
-**Copy the output and paste it into `src/claude_behavior_eval/judge.py`**
-to replace the existing `_SYSTEM_PROMPT` assignment.
+The judge prompt is a versioned artifact. The editable template lives in
+`judge_prompts/<version>.txt` with a `{{CALIBRATION_EXAMPLES}}` marker; the
+grounding examples are generated from the (frozen) `calibration.csv` and inlined
+at that marker. `judge_prompts/FROZEN` names the version that `judge.py` must
+match. All assembly goes through one helper
+(`claude_behavior_eval.judge_prompt.assemble_prompt`), so the generate step, the
+drift check, and `validate_judge` can never disagree.
+
+- `judge_prompts/v0.txt` — the frozen baseline template (extracted verbatim from `judge.py`).
+- `judge_prompts/FROZEN` — one line, the current version (e.g. `v0`).
+- `judge_prompts/LOG.md` — one row per version with dev macro F1, mean κ, dims passing the rule.
+
+### D1. Develop a candidate version on DEV (no judge.py edit needed)
+
+Copy `judge_prompts/v0.txt` to `judge_prompts/v1.txt`, edit the wording (keep the
+`{{CALIBRATION_EXAMPLES}}` marker exactly once), then run the judge on **DEV**
+with the version flag — this assembles `v1` and uses it *without* touching
+`judge.py`. Convention: name candidate outputs `_v<N>`.
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/03_generate_prompt.py
+PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
+  --input-csv data/processed_mrbench/judge_dev.csv \
+  --output-jsonl judge_dev_results_v1.jsonl \
+  --report-md judge_dev_report_v1.md \
+  --judge-prompt-version v1
 ```
 
-Because `calibration.csv` is frozen, the generated prompt is identical to what
-is already in `judge.py`. You only ever need to re-paste if `calibration.csv`
-changes — which it does not. In normal operation this step is a no-op; step E
-verifies that.
+Every output row and the report header carry `judge_prompt_version` and
+`judge_prompt_sha256`.
 
----
+### D2. Inspect disagreements (local, no API)
 
-## E. Check prompt drift  (gate)
+```bash
+PYTHONPATH=src .venv/bin/python scripts/07_disagreements.py \
+  --input judge_dev_results_v1.jsonl --output disagreements_dev_v1.md
+```
 
-Confirms `judge.py`'s `_SYSTEM_PROMPT` matches what `03_generate_prompt.py` would
-produce from the current `calibration.csv`. Must print PASS before any API step.
+### D3. Decide, freeze, and paste
+
+When a candidate wins on DEV, record it in `judge_prompts/LOG.md`, write its name
+into `FROZEN`, regenerate the pasteable block, and paste it into `judge.py`:
+
+```bash
+echo v1 > judge_prompts/FROZEN
+PYTHONPATH=src .venv/bin/python scripts/03_generate_prompt.py   # prints the _SYSTEM_PROMPT block
+# → paste the printed block into src/claude_behavior_eval/judge.py
+```
+
+`03` reads `FROZEN`, assembles that version, writes
+`judge_prompts/<version>.assembled.txt`, and prints its SHA-256.
+
+### E. Check prompt drift (gate)
+
+Confirms `judge.py`'s `_SYSTEM_PROMPT` is byte-identical to the assembled prompt of
+the version named in `FROZEN`. The PASS/FAIL line reports the version and SHA-256.
+FAILs (non-zero exit) if `FROZEN` names a missing version or the marker is
+missing/duplicated. Must PASS before any API step.
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/05_check_prompt_drift.py
 ```
+
+For the frozen `v0` baseline, D3 is a no-op: `judge.py` already matches `v0`, so
+`05` prints PASS immediately.
 
 ---
 
@@ -153,14 +194,15 @@ Output:
 PYTHONPATH=src .venv/bin/python -m pytest --tb=short -q
 ```
 
-All 301 tests should pass before running any API-backed steps.
+All 333 tests should pass before running any API-backed steps.
 
 ---
 
-## H. Judge validation on dev set (API call)
+## H. Judge validation on dev set with the FROZEN prompt (API call)
 
-Runs the Judge against each row in `judge_dev.csv` (one API call per row) and
-writes per-row JSONL results and a Markdown report.
+After freezing (§D3) and PASS (§E), run the Judge against `judge_dev.csv` with the
+frozen `judge.py` prompt (no `--judge-prompt-version` flag) to produce the DEV
+results that the pre-registered decision (§J) consumes.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
@@ -185,18 +227,36 @@ PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
 
 ---
 
-## J. Actor-Critic optimisation (API call)
+## J. Pre-registered validation decision (local, no API)
+
+Recompute per-dimension κ and pass-precision from the DEV results and apply the
+pre-registered rule (κ ≥ 0.40 AND pass-precision ≥ 0.80; both are CLI flags).
+Writes `judge_validated_dimensions.json` — the single source of truth for which
+dimensions the optimizer objective may use.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/08_judge_decision.py \
+  --input judge_dev_results.jsonl \
+  --output judge_validated_dimensions.json
+```
+
+---
+
+## K. Actor-Critic optimisation (API call)
 
 Runs `N` iterations of Actor generation + Judge scoring + prompt improvement over
-`actor_train.csv`. Writes `iteration_<i>_results.jsonl`, `iteration_<i>_prompt.txt`,
-and a final `optimized_prompt.txt` (the improvement generated after the last
-evaluated iteration; it is itself not scored).
+`actor_train.csv`. With `--objective-dims-file`, only the validated dimensions are
+shown to the optimizer; excluded dimensions are still scored and written to each
+iteration JSONL but hidden from the objective. Writes `iteration_<i>_results.jsonl`,
+`iteration_<i>_prompt.txt`, `run_manifest.json` (objective dims + judge prompt
+SHA-256), and a final `optimized_prompt.txt`.
 
 ```bash
 PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/optimize.py \
   --input-csv data/processed_mrbench/actor_train.csv \
   --iterations 3 \
-  --output-dir optimization_runs
+  --output-dir optimization_runs \
+  --objective-dims-file judge_validated_dimensions.json
 ```
 
 To resume from a previously optimised prompt, add
@@ -204,7 +264,7 @@ To resume from a previously optimised prompt, add
 
 ---
 
-## K. Final Actor evaluation on held-out test set (API call)
+## L. Final Actor evaluation on held-out test set (API call)
 
 Score the optimised prompt on the locked test set (never used during optimisation).
 
@@ -231,16 +291,23 @@ PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
 PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/report.py \
   --baseline-jsonl actor_test_baseline.jsonl \
   --optimized-jsonl actor_test_optimized.jsonl \
-  --output-md final_results.md
+  --output-md final_results.md \
+  --objective-dims-file judge_validated_dimensions.json
 ```
+
+`report.py` always reports all eight dimensions; `--objective-dims-file` only adds
+an "In objective" marker column.
 
 ---
 
-## L. Paper statistics (local, no API)
+## M. Paper statistics (local, no API)
 
 Computes per-dimension Judge reliability (accuracy, precision/recall/F1, Cohen's
 kappa, Clopper-Pearson CIs) and Actor pass-rate comparisons (with McNemar tests)
 from the JSONL outputs above. Requires `scipy`.
+
+`--objective-dims-file judge_validated_dimensions.json` optionally adds an `obj`
+marker column (all eight dimensions are still reported either way).
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/06_stats.py \
@@ -248,6 +315,7 @@ PYTHONPATH=src .venv/bin/python scripts/06_stats.py \
   --judge-test judge_test_results.jsonl \
   --baseline actor_test_baseline.jsonl \
   --optimized actor_test_optimized.jsonl \
+  --objective-dims-file judge_validated_dimensions.json \
   --output-md stats_report.md
 ```
 
@@ -266,6 +334,16 @@ PYTHONPATH=src .venv/bin/python scripts/06_stats.py \
 | `data/processed_mrbench/judge_split_manifest.json` | — | Split provenance + filter counts | — | — |
 | `data/processed_mrbench/actor_train.csv` | ≤55 convs | Actor optimisation input | No | No |
 | `data/processed_mrbench/actor_test.csv` | 60 convs | Actor evaluation (held-out) | No | No |
+
+### Versioned judge prompt (tracked, not under `data/`)
+
+| File | Purpose |
+|---|---|
+| `judge_prompts/<version>.txt` | Editable prompt template with `{{CALIBRATION_EXAMPLES}}` marker |
+| `judge_prompts/FROZEN` | One line: the version `judge.py` must match |
+| `judge_prompts/LOG.md` | One row per version: dev macro F1, mean κ, dims passing the rule |
+| `judge_prompts/<version>.assembled.txt` | Assembled prompt written by `03` (git-ignored) |
+| `judge_validated_dimensions.json` | Pre-registered decision output; optimizer objective source |
 
 All files under `data/` are git-ignored (regenerated from raw data).
 `optimization_runs/` outputs are also git-ignored.
