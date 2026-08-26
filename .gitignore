@@ -38,3 +38,6 @@ data/raw_mrbench/
 
 # Logs
 *.log
+
+# Generated assembled judge prompt (03_generate_prompt.py)
+judge_prompts/*.assembled.txt
