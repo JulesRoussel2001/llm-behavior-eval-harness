@@ -83,12 +83,21 @@ def fmt_ci(ci: tuple[float, float]) -> str:
 # ---------------------------------------------------------------- judge ----
 
 
-def judge_section(name: str, rows: list[dict]) -> str:
+def _obj_mark(dim: str, objective: set[str] | None) -> str:
+    """Trailing objective-marker cell ('| ✓ |' / '| — |') or '' when no objective given."""
+    if objective is None:
+        return ""
+    return " ✓ |" if dim in objective else " — |"
+
+
+def judge_section(name: str, rows: list[dict], objective: set[str] | None = None) -> str:
     n_conv = len({r["item_id"].rsplit("_", 1)[0] for r in rows})
+    obj_h = " obj |" if objective is not None else ""
+    obj_s = "---|" if objective is not None else ""
     out = [f"## Judge validation: {name}", "",
            f"Rows: {len(rows)} (conversations: {n_conv})", "",
-           "| Dimension | n | Human=True % | Acc % | 95% CI (acc) | P % | R % | F1 % | kappa |",
-           "|---|---|---|---|---|---|---|---|---|"]
+           "| Dimension | n | Human=True % | Acc % | 95% CI (acc) | P % | R % | F1 % | kappa |" + obj_h,
+           "|---|---|---|---|---|---|---|---|---|" + obj_s]
     accs, f1s, kappas = [], [], []
     for d in DIMS:
         tp = fp = fn = tn = 0
@@ -115,6 +124,7 @@ def judge_section(name: str, rows: list[dict]) -> str:
         out.append(
             f"| {d} | {n} | {fmt_pct(prev)} | {fmt_pct(acc)} | {fmt_ci(ci)} | "
             f"{fmt_pct(prec)} | {fmt_pct(rec)} | {fmt_pct(f1)} | {kap:.2f} |"
+            + _obj_mark(d, objective)
         )
     mean = lambda xs: sum(x for x in xs if x == x) / max(1, sum(1 for x in xs if x == x))
     out += ["",
@@ -131,14 +141,20 @@ def passed(row: dict, d: str) -> bool:
     return bool(s and s.get(d, {}).get("passed", False))
 
 
-def actor_section(baseline_runs: list[list[dict]], optimized_runs: list[list[dict]]) -> str:
+def actor_section(
+    baseline_runs: list[list[dict]],
+    optimized_runs: list[list[dict]],
+    objective: set[str] | None = None,
+) -> str:
     k_runs = min(len(baseline_runs), len(optimized_runs))
     out = ["## Actor evaluation: baseline vs optimized", ""]
     out.append(f"Runs: {len(baseline_runs)} baseline, {len(optimized_runs)} optimized; "
                f"items per run: {[len(r) for r in baseline_runs]} / {[len(r) for r in optimized_runs]}")
+    obj_h = " obj |" if objective is not None else ""
+    obj_s = "---|" if objective is not None else ""
     out += ["",
-            "| Dimension | Baseline % (mean [min, max]) | 95% CI run 1 | Optimized % (mean [min, max]) | 95% CI run 1 | Delta (pts) | Discordant b→o / o→b (pooled) | McNemar p (per run) |",
-            "|---|---|---|---|---|---|---|---|"]
+            "| Dimension | Baseline % (mean [min, max]) | 95% CI run 1 | Optimized % (mean [min, max]) | 95% CI run 1 | Delta (pts) | Discordant b→o / o→b (pooled) | McNemar p (per run) |" + obj_h,
+            "|---|---|---|---|---|---|---|---|" + obj_s]
 
     def rates(runs: list[list[dict]], d: str):
         vals = []
@@ -174,6 +190,7 @@ def actor_section(baseline_runs: list[list[dict]], optimized_runs: list[list[dic
             f"{fmt_pct(mo)} [{fmt_pct(min(vo))}, {fmt_pct(max(vo))}] | {fmt_ci(co[0])} | "
             f"{100 * (mo - mb):+.1f} | {disc_bo} / {disc_ob} | "
             + ", ".join("nan" if p != p else f"{p:.2g}" for p in pvals) + " |"
+            + _obj_mark(d, objective)
         )
     mb, mo = sum(macro_b) / len(macro_b), sum(macro_o) / len(macro_o)
     out += ["", f"Macro pass rate (mean over runs): baseline {fmt_pct(mb)}% → optimized {fmt_pct(mo)}% "
@@ -190,16 +207,24 @@ def main() -> None:
     p.add_argument("--baseline", type=Path, nargs="*", default=[])
     p.add_argument("--optimized", type=Path, nargs="*", default=[])
     p.add_argument("--output-md", type=Path, default=Path("stats_report.md"))
+    p.add_argument("--objective-dims-file", type=Path, default=None,
+                   help="Optional judge_validated_dimensions.json; adds an 'obj' marker column "
+                        "showing which dimensions were in the optimization objective (all 8 still shown).")
     a = p.parse_args()
+
+    objective: set[str] | None = None
+    if a.objective_dims_file is not None:
+        spec = json.loads(a.objective_dims_file.read_text(encoding="utf-8"))
+        objective = set(spec.get("validated", []))
 
     parts = ["# Statistics report", ""]
     if a.judge_dev:
-        parts.append(judge_section("dev", read_jsonl(a.judge_dev)))
+        parts.append(judge_section("dev", read_jsonl(a.judge_dev), objective))
     if a.judge_test:
-        parts.append(judge_section("held-out test", read_jsonl(a.judge_test)))
+        parts.append(judge_section("held-out test", read_jsonl(a.judge_test), objective))
     if a.baseline and a.optimized:
         parts.append(actor_section([read_jsonl(x) for x in a.baseline],
-                                   [read_jsonl(x) for x in a.optimized]))
+                                   [read_jsonl(x) for x in a.optimized], objective))
     text = "\n".join(parts)
     a.output_md.write_text(text, encoding="utf-8")
     print(text)
