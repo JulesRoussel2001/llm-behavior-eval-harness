@@ -1,284 +1,122 @@
-# LLM Behavior Evaluation Harness
+# Judge Prompt Version Log
 
-**A reproducible Python pipeline for evaluating and optimizing subjective LLM tutor behavior with deterministic checks, frozen rubric judging, and mini actor-critic prompt optimization.**
+Each row below corresponds to one candidate version of the editable judge prompt template (`judge_prompts/<version>.txt`).
 
----
+All judge-development metrics are measured on the **judge DEV split only**.
 
-> **Disclaimer:** This is an independent portfolio/open-source project. It is not an official Anthropic project. It uses Anthropic APIs to explore reproducible evaluation workflows for subjective LLM behavior and may later be adapted into a smaller educational contribution.
+A dimension passes the pre-registered D1 validation rule when:
 
----
+* κ ≥ 0.40, and
+* pass-precision ≥ 0.80.
 
-## Why this project exists
+See `08_judge_decision.py` for the complete decision policy.
 
-Many LLM behaviors are subjective and hard to evaluate reproducibly. Tutor quality is not only about correctness — it also includes guidance style, tone, answer-revealing discipline, coherence, actionability, and human-likeness. Off-the-shelf benchmarks rarely capture these dimensions in an auditable way.
+| Version | Date       | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                       | DEV Macro F1 | DEV Mean κ | Dimensions Passing D1                                                                      |
+| ------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -----------: | ---------: | ------------------------------------------------------------------------------------------ |
+| **v0**  | 2026-08-26 | Initial prompt extracted verbatim from `judge.py` and used as the frozen baseline.                                                                                                                                                                                                                                                                                                                                                                           |        86.3% |       0.47 | **6/8** — excluded: `providing_guidance` (κ = 0.32), `tutor_tone` (pass-precision = 49.5%) |
+| **v1**  | 2026-08-27 | Proposed by `claude-sonnet-5` from v0 DEV disagreements (`v1.rationale.md`; six systematic patterns, independently matched by manual analysis). Human-reviewed and edited in three places (`v1.review.patch`): tone criterion narrowed to explicit encouragement; identification/location clarification restated as a dataset premise; answer-revealing clarification restricted to revealing the final answer and extended to off-topic responses.          |        86.9% |       0.50 | **6/8** — excluded: `providing_guidance` (κ = 0.38), `tutor_tone` (pass-precision = 55.0%) |
+| **v2**  | 2026-08-27 | Proposed by `claude-sonnet-5` from v1 DEV disagreements (`v2.rationale.md`). Accepted proposed rules 1–3; rejected 4–5. Rules 6–7 were rejected and inverted after human review because the proposer had misread the false-negative direction: v1's `coherence` and `human_likeness` clarifications had made the judge too strict, reducing recall from 96.5→86.5 and 94.9→89.3 respectively. v2 therefore softened both clarifications (`v2.review.patch`). |    **89.1%** |   **0.57** | **7/8** — excluded: `tutor_tone` (pass-precision = 63.8%)                                  |
+| **v3**  | 2026-08-27 | Human-proposed diagnostic ablation from v2. Replaced only the one-line definitions of `mistake_identification` and `mistake_location` with the verbatim MRBench taxonomy questions from Maurya et al. (2025), Table 2. All other prompt content was left unchanged.                                                                                                                                                                                          |      Pending |    Pending | Pending                                                                                    |
 
-This project turns subjective tutor behavior into auditable signals by combining:
+## v2 Self-Consistency Check
 
-- **Deterministic checks** for cheap objective constraints (e.g. no direct answer revealing)
-- **Strict Pydantic schemas** for structured, validated outputs
-- **A frozen Claude rubric judge** calibrated against MRBench human annotations
-- **Benchmark-derived splits** for judge calibration, dev validation, and held-out test
-- **Mini actor-critic prompt optimization** — iteratively improving a tutor prompt based on judge feedback
-- **Reproducible Markdown reports** comparing baseline vs. optimized prompts
+* **2026-08-27:** Re-scored the judge DEV split three times with the frozen v2 judge to measure sampling variability. Pairwise label agreement was **99.2%**, with run-to-run **κ = 0.95–1.00**; only **19/1,520 labels flipped**, and **175/190 rows were identical across all eight dimensions**.
+* The remaining flips were concentrated in the less sharply defined criteria, including `tutor_tone` and `actionability`, while `human_likeness` showed no flips.
+* Because judge-to-human agreement is substantially lower than judge-to-judge agreement, the remaining judge–human gap is interpreted as **predominantly systematic disagreement about rubric boundaries rather than stochastic sampling noise**.
+* See `stats_self_consistency.txt` and the associated repeat-run script/output.
 
-The result is an end-to-end pipeline where each evaluation step is traceable, schema-validated, and separated by a clear checkpoint discipline.
+## v3 Diagnostic Hypothesis
 
----
+The v3 intervention tests whether the persistent disagreement on `mistake_identification` and `mistake_location` is attributable to rubric wording.
 
-## Main features
+The two replacement definitions are:
 
-- MRBench-style preprocessing and label normalization
-- Class-aware data splits for judge calibration / dev / test and actor mini train / test
-- Strict Pydantic schemas for structured outputs
-- Deterministic checks for cheap objective constraints
-- Frozen Claude rubric judge using structured tool/schema outputs
-- Prompt drift check to ensure the generated judge prompt matches `judge.py`
-- Local pytest test suite with mocked API behavior
-- API-backed judge validation against human annotations
-- Mini actor-critic prompt optimization
-- Baseline vs. optimized comparison report
+> **mistake_identification:** “Has the tutor identified/recognized a mistake in a student’s response?”
 
----
+> **mistake_location:** “Does the tutor’s response accurately point to a genuine mistake and its location?”
 
-## Tech stack
+Source: Maurya et al. (2025), MRBench taxonomy / annotation guidelines, Table 2.
 
-- Python 3.11+
-- Pydantic v2
-- pytest
-- Anthropic API / Tool Use
-- argparse CLIs
-- JSONL + Markdown reporting
+### Pre-specified interaction
 
----
+The `mistake_location` question contains the word **“genuine”**, which may encourage the judge to independently re-verify the mathematics. This may conflict with the existing dataset-premise clarification instructing the judge not to re-solve the problem in order to conclude that no mistake exists.
 
-## Architecture overview
+Therefore, a decrease in `mistake_location` κ is pre-specified as evidence of this instruction interaction rather than evidence of a wording benefit.
 
-```
-Raw MRBench JSON
-  -> prepare_mrbench
-  -> processed CSVs + normalized labels
-  -> judge/dev/test splits
-  -> generated frozen judge prompt
-  -> prompt drift check
-  -> frozen Claude judge validation
-  -> actor mini train/test splits
-  -> baseline tutor evaluation
-  -> actor-critic prompt optimization
-  -> optimized tutor evaluation
-  -> mini_results.md comparison report
-```
+### v3 Decision Rule
+
+Freeze **v3** iff:
+
+1. DEV mean κ is **strictly greater than 0.57**, and
+2. all seven dimensions that passed D1 under v2 continue to pass D1 under v3.
+
+Otherwise, freeze **v2**.
 
 ---
 
-## Installation
+# Harness Notes
 
-Python 3.11+ is recommended.
+These changes affect evaluation robustness only; they do **not** change judge semantics or boolean scores.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY="your_api_key_here"
-```
+* **2026-08-27:** Diagnostic `reason` fields longer than 25 words are truncated before schema validation; `passed` values are never modified.
+* **2026-08-27:** `validate_judge` now writes completed rows incrementally and supports `--resume`, preventing completed API evaluations from being lost after a crash.
 
 ---
 
-## Full reproducible pipeline
+# Actor Prompt Optimization
 
-### Local / preparation pipeline (no API calls)
+## Training Trajectory
 
-**Step 1 — Prepare MRBench data**
+The actor prompt optimizer was developed only on the actor training split.
 
-```bash
-PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.prepare_mrbench \
-  --input-json data/raw_mrbench/MRBench/MRBench_V2.json \
-  --output-dir data/processed_mrbench
+Macro pass rate over the seven optimization-visible judge dimensions:
+
+| Stage             | Actor-train macro pass rate |
+| ----------------- | --------------------------: |
+| Baseline          |                       60.7% |
+| After iteration 1 |                       98.4% |
+| After iteration 2 |                       98.6% |
+
+The optimization effectively saturated after the first rewrite; iteration 2 produced only a marginal additional improvement.
+
+This training performance is **not interpreted as evidence that tutoring quality generalized**. Generalization is evaluated separately on the untouched actor test split.
+
+`tutor_tone` was excluded from the optimization objective and therefore serves as a small unoptimized control dimension.
+
+## Frozen Actor Prompt Selection
+
+Before evaluating the actor on the held-out actor test split, the selected optimized prompt was fixed as the **last prompt that had actually been scored on actor training**:
+
+`optimization_runs/iteration_2_prompt.txt`
+
+SHA-256:
+
+```text
+241a166a948e2dade46147c7c273dd6a9ad3ba593d2153dcb13725d4e5d2fc93
 ```
 
-**Step 2 — Verify labels**
+The later file:
 
-```bash
-PYTHONPATH=src .venv/bin/python scripts/02_verify_labels.py
-```
+`optimization_runs/optimized_prompt.txt`
 
-**Step 3 — Create judge/dev/test splits**
+is the optimizer's final **unscored** output and is **not used for held-out evaluation**.
 
-```bash
-PYTHONPATH=src .venv/bin/python scripts/01_create_splits.py
-```
-
-**Step 4 — Generate frozen judge prompt**
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/03_generate_prompt.py
-```
-
-At this point, copy the generated `_SYSTEM_PROMPT` block into:
-
-```
-src/claude_behavior_eval/judge.py
-```
-
-This manual step is intentional: it requires a conscious review of the generated prompt before it is frozen into the judge. The drift check in Step 5 then verifies the paste was correct.
-
-**Step 5 — Prompt drift check**
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/05_check_prompt_drift.py
-```
-
-Expected result:
-
-```
-PASS: judge.py prompt matches generated prompt.
-```
-
-**Step 6 — Create actor mini train/test splits**
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/04_create_actor_splits.py
-```
-
-**Step 7 — Run local test suite**
-
-```bash
-PYTHONPATH=src .venv/bin/python -m pytest --tb=short -q
-```
-
-At this point, the local/preparation pipeline is complete. All tests should pass before proceeding to API-backed steps.
+This selection was recorded before inspecting actor-test results so that the test set could not influence prompt selection.
 
 ---
 
-### API-backed pipeline
+# Actor Test Protocol
 
-**Step 8 — Judge dev validation**
+The frozen baseline prompt and frozen selected optimized prompt are each evaluated three times on the same held-out actor test split.
 
-```bash
-PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
-  --input-csv data/processed_mrbench/judge_dev.csv \
-  --output-jsonl judge_dev_results.jsonl \
-  --report-md judge_dev_report.md
+The optimized runs use:
+
+```text
+--actor-system-prompt-file optimization_runs/iteration_2_prompt.txt
 ```
 
-Inspect `judge_dev_report.md` to check alignment with human annotations before touching the held-out test set.
+The contents of `iteration_2_prompt.txt` must not be edited after its SHA-256 has been recorded.
 
-**Step 9 — Judge held-out test validation** *(run once only, after the judge is considered acceptable)*
+Baseline-vs-optimized conclusions are made only from evaluations performed under the same final frozen judge.
 
-```bash
-PYTHONPATH=src .venv/bin/python -m claude_behavior_eval.validate_judge \
-  --input-csv data/processed_mrbench/judge_test.csv \
-  --output-jsonl judge_test_results.jsonl \
-  --report-md judge_test_report.md
-```
-
----
-
-### Mini actor-critic pipeline
-
-**Step 10 — Iterative prompt optimization**
-
-```bash
-PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/optimize.py \
-  --input-csv data/processed_mrbench/actor_mini_train.csv \
-  --iterations 3 \
-  --output-dir optimization_runs
-```
-
-**Step 11 — Baseline tutor evaluation**
-
-```bash
-PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
-  data/processed_mrbench/actor_mini_test.csv \
-  actor_mini_baseline.jsonl
-```
-
-**Step 12 — Optimized tutor evaluation**
-
-```bash
-PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/main.py \
-  data/processed_mrbench/actor_mini_test.csv \
-  actor_mini_optimized.jsonl \
-  --actor-system-prompt-file optimization_runs/optimized_prompt.txt
-```
-
-**Step 13 — Generate comparison report**
-
-```bash
-PYTHONPATH=src .venv/bin/python src/claude_behavior_eval/report.py \
-  --baseline-jsonl actor_mini_baseline.jsonl \
-  --optimized-jsonl actor_mini_optimized.jsonl \
-  --output-md mini_results.md
-```
-
----
-
-## Important checkpoints
-
-- After **Step 5**, the prompt drift check must pass before any API-backed steps.
-- After **Step 7**, all local tests must pass.
-- After **Step 8**, inspect `judge_dev_report.md` before touching the held-out test set.
-- **Step 9** should be run once only, after the judge is considered acceptable.
-- The mini actor-critic results are a small-scale demonstration, not a broad benchmark claim.
-
----
-
-## Mini results
-
-Results from a single end-to-end run on the mini actor test split:
-
-| Metric | Baseline | Optimized | Delta (pts) |
-|---|---|---|---|
-| deterministic_pass_rate | 100.0% | 100.0% | +0.0 |
-| mistake_identification_pass_rate | 95.0% | 100.0% | +5.0 |
-| mistake_location_pass_rate | 85.0% | 95.0% | +10.0 |
-| answer_revealing_appropriate_pass_rate | 10.0% | 100.0% | +90.0 |
-| providing_guidance_pass_rate | 80.0% | 100.0% | +20.0 |
-| actionability_pass_rate | 100.0% | 100.0% | +0.0 |
-| coherence_pass_rate | 100.0% | 100.0% | +0.0 |
-| tutor_tone_pass_rate | 100.0% | 100.0% | +0.0 |
-| human_likeness_pass_rate | 95.0% | 100.0% | +5.0 |
-| judge_macro_pass_rate | 83.1% | 99.4% | +16.2 |
-
-> These are mini-pipeline results on a small actor test split. They show that the pipeline can run end-to-end and detect measurable differences between baseline and optimized prompts under the frozen judge. They should not be interpreted as a broad claim that the optimized prompt generalizes to all tutoring contexts.
-
----
-
-## Engineering quality
-
-- Typed Python modules throughout (`from __future__ import annotations`)
-- Pydantic v2 validation for all structured outputs
-- pytest coverage with mocked API behavior (no live API calls in CI)
-- CLI entry points for all pipeline stages
-- Generated Markdown reports for every evaluation run
-- Reproducible, class-aware split generation with a fixed seed
-- Prompt drift guard to prevent silent judge/prompt desync
-
----
-
-## Limitations
-
-- The judge is a validated proxy evaluator, not objective ground truth. Results depend on judge prompt quality and schema design.
-- Mini actor-critic results are small-scale and should not be extrapolated.
-- Human review would be needed before high-stakes educational use.
-- External judge comparison or human calibration would be useful future work.
-- This is a portfolio/research artifact, not a production evaluation platform.
-
-The main takeaway is not that the optimized prompt is universally superior, but that the harness can reproducibly detect and report behavior changes between prompt variants.
----
-
-## Future work
-
-- Add confidence intervals and bootstrap reporting.
-- Add external judge agreement analysis.
-- Add a larger held-out evaluation set.
-- Add CI workflow (GitHub Actions).
-- Add richer per-dimension failure visualizations.
-- Package as a lesson-style version for potential contribution to prompt-evaluation educational materials.
-
----
-
-## Data
-
-The raw MRBench data (`data/raw_mrbench/`) is not included in this repository. Download it from the [MRBench repository](https://github.com/MRBench/MRBench) and place it at `data/raw_mrbench/` before running Step 1.
-
-Processed splits (`data/processed_mrbench/`) are generated locally by running Steps 1–6 and are also excluded from the repository.
+Baseline results from earlier pilot runs using previous judge versions are not directly comparable because the measurement instrument changed during judge development.
