@@ -131,4 +131,4 @@ expected SHA-256, run `08_judge_decision.py` on that version's DEV results (D5),
 
 ## 3. Log of deviations
 
-None.
+- 2026-08-27: judge max_tokens raised 512 → 1024 after two truncated tool outputs during actor test runs. Frozen prompt (SHA 16c17879…) unchanged. This cannot alter any valid score; it only prevents truncation, which previously crashed the run. All DEV/TEST validation rows completed without truncation, so validation results are unaffected. Judge calls that still fail after 2 retries are recorded as judge_error and reported, not silently dropped.

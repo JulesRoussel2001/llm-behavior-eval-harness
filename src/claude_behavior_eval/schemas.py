@@ -72,3 +72,5 @@ class EvaluationResult(BaseModel):
     generated_response: str
     deterministic_passed: bool
     judge_scores: MRBenchEvaluation | None
+    # Set when the judge could not be scored (e.g. "malformed_tool_output"); None otherwise.
+    judge_error: str | None = None

@@ -99,8 +99,8 @@ class TestEvaluateResponseCallParameters:
     def test_uses_temperature_zero(self):
         assert self.call_kwargs["temperature"] == 0.0
 
-    def test_uses_max_tokens_512(self):
-        assert self.call_kwargs["max_tokens"] == 512
+    def test_uses_max_tokens_1024(self):
+        assert self.call_kwargs["max_tokens"] == 1024
 
     def test_forces_tool_choice(self):
         assert self.call_kwargs["tool_choice"] == {

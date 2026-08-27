@@ -20,6 +20,7 @@ def run_evaluation(
     actor_model: str,
     judge_model: str,
     actor_system_prompt: str = ACTOR_SYSTEM_PROMPT,
+    resume: bool = False,
 ) -> None:
     judge = ClaudeRubricJudge(model=judge_model)
     orchestrator = PipelineOrchestrator(judge=judge, actor_model=actor_model)
@@ -27,10 +28,25 @@ def run_evaluation(
 
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_jsonl.open("w", encoding="utf-8") as out:
+    # --resume: keep rows already written and skip their item_ids.
+    existing_ids: set[str] = set()
+    write_mode = "w"
+    if resume and output_jsonl.exists():
+        with output_jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    existing_ids.add(json.loads(line)["item_id"])
+        write_mode = "a"
+
+    # Write each row as it is produced and flush, so a crash keeps completed rows.
+    with output_jsonl.open(write_mode, encoding="utf-8") as out:
         for item in loader.load():
+            if item.id in existing_ids:
+                continue
             result = orchestrator.evaluate_single_item(item, actor_system_prompt=actor_system_prompt)
             out.write(result.model_dump_json() + "\n")
+            out.flush()
             print(f"Processed {item.id}")
 
 
@@ -55,6 +71,11 @@ if __name__ == "__main__":
         default=None,
         help="Path to a text file whose contents will be used as the actor system prompt.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip item_ids already present in the output JSONL and append the rest.",
+    )
 
     args = parser.parse_args()
 
@@ -72,4 +93,5 @@ if __name__ == "__main__":
         actor_model=args.actor_model,
         judge_model=args.judge_model,
         actor_system_prompt=actor_system_prompt,
+        resume=args.resume,
     )

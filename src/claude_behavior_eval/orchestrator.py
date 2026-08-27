@@ -61,6 +61,15 @@ class PipelineOrchestrator:
             )
 
         judge_scores = self._judge.evaluate_response(item, generated_text)
+        if judge_scores is None:
+            # Judge output was malformed after all retries — record it, don't crash.
+            return EvaluationResult(
+                item_id=item.id,
+                generated_response=generated_text,
+                deterministic_passed=True,
+                judge_scores=None,
+                judge_error="malformed_tool_output",
+            )
         return EvaluationResult(
             item_id=item.id,
             generated_response=generated_text,
