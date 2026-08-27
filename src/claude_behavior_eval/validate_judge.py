@@ -78,12 +78,29 @@ def _parse_dim_label(dim: str, value: str) -> bool:
     return parse_human_label(value)
 
 
+def _truncated_count(judge: object) -> int:
+    """Read a judge's truncated-reason count, tolerating test doubles (→ 0)."""
+    value = getattr(judge, "truncated_reason_count", 0)
+    return value if isinstance(value, int) else 0
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
 def validate_judge(
     input_csv: Path,
     output_jsonl: Path,
     report_md: Path,
     judge: ClaudeRubricJudge | None = None,
     judge_prompt_version: str | None = None,
+    resume: bool = False,
 ) -> dict[str, object]:
     # Resolve the prompt actually used, its version label, and its SHA-256.
     # With a version: assemble judge_prompts/<version>.txt (regardless of FROZEN)
@@ -102,12 +119,23 @@ def validate_judge(
             else ClaudeRubricJudge()
         )
 
-    jsonl_rows: list[dict] = []
-    dim_data: dict[str, list[_DimEntry]] = {dim: [] for dim in _JUDGE_DIMENSIONS}
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
-    with input_csv.open(encoding="utf-8", newline="") as f:
+    # --resume: keep already-completed rows and skip their item_ids.
+    existing_ids: set[str] = set()
+    write_mode = "w"
+    if resume and output_jsonl.exists():
+        existing_ids = {r["item_id"] for r in _read_jsonl(output_jsonl)}
+        write_mode = "a"
+
+    # Stream each new row to disk and flush per row, so a crash keeps completed rows
+    # instead of losing the whole run.
+    with input_csv.open(encoding="utf-8", newline="") as f, \
+            output_jsonl.open(write_mode, encoding="utf-8") as out:
         for row in csv.DictReader(f):
             item_id = row["id"]
+            if item_id in existing_ids:
+                continue
 
             raw_constraints = row.get("instruction_constraints", "").strip()
             instruction_constraints = json.loads(raw_constraints) if raw_constraints else []
@@ -135,17 +163,12 @@ def validate_judge(
             for dim in _JUDGE_DIMENSIONS:
                 human_val = _parse_dim_label(dim, row[f"human_{dim}"])
                 judgment = getattr(evaluation, dim)
-                judge_val: bool = judgment.passed
-                reason: str = judgment.reason
-
                 human_labels[dim] = human_val
-                judge_labels[dim] = judge_val
-                judge_reasons[dim] = reason
-                matches[dim] = human_val == judge_val
+                judge_labels[dim] = judgment.passed
+                judge_reasons[dim] = judgment.reason
+                matches[dim] = human_val == judgment.passed
 
-                dim_data[dim].append((human_val, judge_val, item_id, reason, excerpt))
-
-            jsonl_rows.append({
+            out.write(json.dumps({
                 "item_id": item_id,
                 "judge_prompt_version": judge_prompt_version,
                 "judge_prompt_sha256": judge_prompt_sha256,
@@ -154,12 +177,20 @@ def validate_judge(
                 "judge_reasons": judge_reasons,
                 "matches": matches,
                 "tutor_response_excerpt": excerpt,
-            })
+            }) + "\n")
+            out.flush()
 
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with output_jsonl.open("w", encoding="utf-8") as f:
-        for row in jsonl_rows:
-            f.write(json.dumps(row) + "\n")
+    # Compute metrics and the report from the FULL file (resumed + newly written rows).
+    dim_data: dict[str, list[_DimEntry]] = {dim: [] for dim in _JUDGE_DIMENSIONS}
+    for r in _read_jsonl(output_jsonl):
+        for dim in _JUDGE_DIMENSIONS:
+            dim_data[dim].append((
+                bool(r["human_labels"][dim]),
+                bool(r["judge_labels"][dim]),
+                r["item_id"],
+                r["judge_reasons"][dim],
+                r.get("tutor_response_excerpt", ""),
+            ))
 
     per_dimension: dict[str, dict[str, float]] = {}
     for dim in _JUDGE_DIMENSIONS:
@@ -178,6 +209,7 @@ def validate_judge(
         "per_dimension": per_dimension,
         "judge_prompt_version": judge_prompt_version,
         "judge_prompt_sha256": judge_prompt_sha256,
+        "truncated_reason_count": _truncated_count(judge),
     }
 
     _write_report(report_md, metrics, dim_data)
@@ -206,12 +238,14 @@ def _write_report(
     per_dimension: dict[str, dict[str, float]] = metrics["per_dimension"]  # type: ignore[assignment]
     version = metrics.get("judge_prompt_version")
     sha = metrics.get("judge_prompt_sha256")
+    truncated = metrics.get("truncated_reason_count", 0)
 
     lines: list[str] = [
         "# Judge Validation Report",
         "",
         f"**Judge prompt version:** {version if version is not None else 'judge.py (frozen)'}  ",
         f"**Judge prompt SHA-256:** {sha}  ",
+        f"**Reasons truncated (>25 words):** {truncated}  ",
         f"**Macro F1:** {macro_f1:.1f}%  ",
         f"**Macro Accuracy:** {macro_accuracy:.1f}%",
         "",
@@ -284,6 +318,11 @@ def main() -> None:
             "judge_dev_report_<version>.md. Omit to use the frozen judge.py prompt."
         ),
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="If the output JSONL already exists, keep its rows and skip item_ids "
+             "already present (re-evaluate only the remaining items).",
+    )
 
     args = parser.parse_args()
 
@@ -292,6 +331,7 @@ def main() -> None:
         output_jsonl=Path(args.output_jsonl),
         report_md=Path(args.report_md),
         judge_prompt_version=args.judge_prompt_version,
+        resume=args.resume,
     )
 
 
