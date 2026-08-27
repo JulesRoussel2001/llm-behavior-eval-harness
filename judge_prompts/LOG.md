@@ -18,6 +18,13 @@ See `08_judge_decision.py` for the complete decision policy.
 | **v2**  | 2026-08-27 | Proposed by `claude-sonnet-5` from v1 DEV disagreements (`v2.rationale.md`). Accepted proposed rules 1–3; rejected 4–5. Rules 6–7 were rejected and inverted after human review because the proposer had misread the false-negative direction: v1's `coherence` and `human_likeness` clarifications had made the judge too strict, reducing recall from 96.5→86.5 and 94.9→89.3 respectively. v2 therefore softened both clarifications (`v2.review.patch`). |    **89.1%** |   **0.57** | **7/8** — excluded: `tutor_tone` (pass-precision = 63.8%)                                  |
 | **v3**  | 2026-08-27 | Human-proposed diagnostic ablation from v2. Replaced only the one-line definitions of `mistake_identification` and `mistake_location` with the verbatim MRBench taxonomy questions from Maurya et al. (2025), Table 2. All other prompt content was left unchanged.                                                                                                                                                                                          |      Pending |    Pending | Pending                                                                                    |
 
+## v2 Self-Consistency Check
+
+* **2026-08-27:** Re-scored the judge DEV split three times with the frozen v2 judge to measure sampling variability. Pairwise label agreement was **99.2%**, with run-to-run **κ = 0.95–1.00**; only **19/1,520 labels flipped**, and **175/190 rows were identical across all eight dimensions**.
+* The remaining flips were concentrated in the less sharply defined criteria, including `tutor_tone` and `actionability`, while `human_likeness` showed no flips.
+* Because judge-to-human agreement is substantially lower than judge-to-judge agreement, the remaining judge–human gap is interpreted as **predominantly systematic disagreement about rubric boundaries rather than stochastic sampling noise**.
+* See `stats_self_consistency.txt` and the associated repeat-run script/output.
+
 ## v3 Diagnostic Hypothesis
 
 The v3 intervention tests whether the persistent disagreement on `mistake_identification` and `mistake_location` is attributable to rubric wording.
@@ -58,7 +65,7 @@ These changes affect evaluation robustness only; they do **not** change judge se
 
 # Actor Prompt Optimization
 
-## Training trajectory
+## Training Trajectory
 
 The actor prompt optimizer was developed only on the actor training split.
 
@@ -94,7 +101,7 @@ The later file:
 
 is the optimizer's final **unscored** output and is **not used for held-out evaluation**.
 
-This selection was recorded before inspecting actor-test results so that the test set cannot influence prompt selection.
+This selection was recorded before inspecting actor-test results so that the test set could not influence prompt selection.
 
 ---
 
@@ -110,4 +117,6 @@ The optimized runs use:
 
 The contents of `iteration_2_prompt.txt` must not be edited after its SHA-256 has been recorded.
 
-Baseline-vs-optimized conclusions are made only from evaluations performed under the same final frozen judge. Baseline results from earlier pilot runs using previous judge versions are not directly comparable because the measurement instrument changed during judge development.
+Baseline-vs-optimized conclusions are made only from evaluations performed under the same final frozen judge.
+
+Baseline results from earlier pilot runs using previous judge versions are not directly comparable because the measurement instrument changed during judge development.
