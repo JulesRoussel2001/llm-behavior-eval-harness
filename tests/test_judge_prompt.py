@@ -18,6 +18,7 @@ from claude_behavior_eval.judge_prompt import (
     build_calibration_examples,
     prompt_sha256,
     read_frozen,
+    version_path,
 )
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -29,8 +30,9 @@ _V0_SHA = "584dabbf45e0e748749a77b7be68f2fe0991f77b62b21206d4e772557c7ecb26"
 # --------------------------------------------------------------------------- #
 
 class TestAssemble:
-    def test_v0_is_byte_identical_to_judge_system_prompt(self):
-        assert assemble_prompt("v0") == judge._SYSTEM_PROMPT
+    def test_frozen_version_is_byte_identical_to_judge_system_prompt(self):
+        # The FROZEN version must assemble byte-for-byte to judge.py's _SYSTEM_PROMPT.
+        assert assemble_prompt(read_frozen()) == judge._SYSTEM_PROMPT
 
     def test_v0_sha_is_stable(self):
         assert prompt_sha256(assemble_prompt("v0")) == _V0_SHA
@@ -65,8 +67,9 @@ class TestReadFrozen:
         with pytest.raises(FileNotFoundError):
             read_frozen(tmp_path)
 
-    def test_repo_frozen_is_v0(self):
-        assert read_frozen() == "v0"
+    def test_repo_frozen_names_existing_version(self):
+        # FROZEN must name a version whose template file exists (not a hard-coded name).
+        assert version_path(read_frozen()).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -83,14 +86,16 @@ def _load_drift_module():
 
 class TestDriftCheck:
     def test_pass_reports_frozen_version_and_sha(self, capsys):
+        version = read_frozen()
+        sha = prompt_sha256(assemble_prompt(version))
         mod = _load_drift_module()
         with pytest.raises(SystemExit) as exc:
             mod.main()
         assert exc.value.code == 0
         out = capsys.readouterr().out
         assert "PASS" in out
-        assert "version v0" in out
-        assert _V0_SHA in out
+        assert f"version {version}" in out
+        assert sha in out
 
     def test_fail_when_frozen_missing(self, tmp_path: Path, capsys):
         mod = _load_drift_module()
