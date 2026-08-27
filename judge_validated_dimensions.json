@@ -1,0 +1,120 @@
+{
+  "rule": {
+    "min_kappa": 0.4,
+    "min_pass_precision": 0.8
+  },
+  "validated": [
+    "mistake_identification",
+    "mistake_location",
+    "answer_revealing_appropriate",
+    "providing_guidance",
+    "actionability",
+    "coherence",
+    "human_likeness"
+  ],
+  "excluded": [
+    "tutor_tone"
+  ],
+  "dimensions": {
+    "mistake_identification": {
+      "tp": 143,
+      "fp": 4,
+      "fn": 26,
+      "tn": 17,
+      "kappa": 0.44948812053312703,
+      "kappa_defined": true,
+      "pass_precision": 0.9727891156462585,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "mistake_location": {
+      "tp": 133,
+      "fp": 4,
+      "fn": 32,
+      "tn": 21,
+      "kappa": 0.4379622021364007,
+      "kappa_defined": true,
+      "pass_precision": 0.9708029197080292,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "answer_revealing_appropriate": {
+      "tp": 146,
+      "fp": 2,
+      "fn": 10,
+      "tn": 32,
+      "kappa": 0.8031767955801107,
+      "kappa_defined": true,
+      "pass_precision": 0.9864864864864865,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "providing_guidance": {
+      "tp": 147,
+      "fp": 8,
+      "fn": 13,
+      "tn": 22,
+      "kappa": 0.6107317073170733,
+      "kappa_defined": true,
+      "pass_precision": 0.9483870967741935,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "actionability": {
+      "tp": 111,
+      "fp": 10,
+      "fn": 24,
+      "tn": 45,
+      "kappa": 0.5954915466499686,
+      "kappa_defined": true,
+      "pass_precision": 0.9173553719008265,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "coherence": {
+      "tp": 161,
+      "fp": 4,
+      "fn": 10,
+      "tn": 15,
+      "kappa": 0.6410256410256407,
+      "kappa_defined": true,
+      "pass_precision": 0.9757575757575757,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    },
+    "tutor_tone": {
+      "tp": 37,
+      "fp": 21,
+      "fn": 18,
+      "tn": 114,
+      "kappa": 0.5089463220675945,
+      "kappa_defined": true,
+      "pass_precision": 0.6379310344827587,
+      "precision_defined": true,
+      "validated": false,
+      "reasons": [
+        "precision_below_threshold"
+      ]
+    },
+    "human_likeness": {
+      "tp": 170,
+      "fp": 5,
+      "fn": 7,
+      "tn": 8,
+      "kappa": 0.5375253549695744,
+      "kappa_defined": true,
+      "pass_precision": 0.9714285714285714,
+      "precision_defined": true,
+      "validated": true,
+      "reasons": []
+    }
+  },
+  "source": "judge_dev_results_v2.jsonl",
+  "sha256_of_source": "94849394eec5d1afb04aef5e55d02aadfef60bb2957a7588b948e7af20421c70"
+}

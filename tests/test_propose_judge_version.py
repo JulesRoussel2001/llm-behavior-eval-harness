@@ -45,9 +45,17 @@ class _Block:
 class _Resp:
     def __init__(self, text): self.content = [_Block(text)]
 
+class _Stream:
+    """Context manager mimicking client.messages.stream(...)."""
+    def __init__(self, resp): self._resp = resp
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def get_final_message(self): return self._resp
+
 class _Messages:
     def __init__(self, text): self._text = text
     def create(self, **kwargs): return _Resp(self._text)
+    def stream(self, **kwargs): return _Stream(_Resp(self._text))
 
 class FakeClient:
     def __init__(self, text): self.messages = _Messages(text)

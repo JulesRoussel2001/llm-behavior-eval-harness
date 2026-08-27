@@ -128,18 +128,23 @@ def build_user_message(current: str, stats: str, disagreements: str) -> str:
 
 
 def propose(client: Anthropic, model: str, current: str, stats: str, disagreements: str) -> str:
-    """One messages.create call. Returns the model's raw text output."""
-    response = client.messages.create(
+    """One streamed messages call. Returns the model's raw text output."""
+    with client.messages.stream(
         model=model,
-        max_tokens=4096,
-        temperature=0.2,
+        max_tokens=32000,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "medium"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_user_message(current, stats, disagreements)}],
-    )
+    ) as stream:
+        response = stream.get_final_message()
     for block in response.content:
         if block.type == "text":
             return block.text
-    raise ValueError("Proposer returned no text block.")
+    raise ValueError(
+        f"Proposer returned no text block. stop_reason={response.stop_reason!r}, "
+        f"block types={[b.type for b in response.content]}"
+    )
 
 
 def _rejected_path(out: Path) -> Path:
