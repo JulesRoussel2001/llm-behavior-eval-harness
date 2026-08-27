@@ -40,6 +40,30 @@ _SYSTEM_PROMPT = (
     "Only provide short observable diagnostic reasons inside the structured tool output."
 )
 
+_MAX_REASON_WORDS = 25
+
+
+def _truncate_reasons(data: dict, max_words: int = _MAX_REASON_WORDS) -> tuple[dict, int]:
+    """Truncate each dimension's `reason` to its first `max_words` words.
+
+    The judge is instructed to keep reasons <= 25 words, and the schema enforces it;
+    occasionally the model overshoots. Truncating the reason string here (using the
+    same whitespace word count the schema validator uses) keeps a long-reason response
+    from failing validation. Only the `reason` text is shortened — `passed` verdicts
+    are never touched, so scores are unaffected. Returns (cleaned_data, n_truncated).
+    """
+    cleaned: dict = {}
+    n_truncated = 0
+    for key, value in data.items():
+        if isinstance(value, dict) and isinstance(value.get("reason"), str):
+            words = value["reason"].split()
+            if len(words) > max_words:
+                value = {**value, "reason": " ".join(words[:max_words])}
+                n_truncated += 1
+        cleaned[key] = value
+    return cleaned, n_truncated
+
+
 class ClaudeRubricJudge:
     def __init__(
         self,
@@ -53,6 +77,9 @@ class ClaudeRubricJudge:
         # validate_judge --judge-prompt-version) may inject a candidate prompt
         # assembled from judge_prompts/<version>.txt without editing this file.
         self._system_prompt = system_prompt if system_prompt is not None else _SYSTEM_PROMPT
+        # Running count of reasons truncated to 25 words across evaluate_response calls,
+        # exposed so validate_judge can report it. Scores are never affected.
+        self.truncated_reason_count = 0
 
     def evaluate_response(
         self,
@@ -89,7 +116,9 @@ class ClaudeRubricJudge:
 
         for block in response.content:
             if block.type == "tool_use" and block.name == "mrbench_evaluation":
-                return MRBenchEvaluation(**block.input)
+                cleaned, n_truncated = _truncate_reasons(block.input)
+                self.truncated_reason_count += n_truncated
+                return MRBenchEvaluation(**cleaned)
 
         raise ValueError(
             "No mrbench_evaluation tool_use block found in the judge response."
