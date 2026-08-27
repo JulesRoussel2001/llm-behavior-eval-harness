@@ -8,3 +8,4 @@ only. "Dimensions passing the rule" uses the pre-registered rule
 | version | date | change | dev macro F1 | dev mean κ | dimensions passing rule |
 |---|---|---|---|---|---|
 | v0 | 2026-08-26 | Initial prompt extracted verbatim from `judge.py` (frozen baseline). | 86.3% | 0.47 | 6/8 — excluded: `providing_guidance` (κ=0.32 < 0.40), `tutor_tone` (pass-precision=49.5% < 0.80) |
+| v1 | 2026-08-27 | harness fix: reasons >25 words are truncated before schema validation (scores unaffected); validate_judge now writes incrementally. | — | — | — (harness fix; prompt text unchanged from v0) |
